@@ -67,6 +67,7 @@ jobs:
   release-images:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         image:
           - agent-runner
