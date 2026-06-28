@@ -260,6 +260,19 @@ and the runtime runs `node /app/dist/cli.js evaluate-changes web` with
   names across SkillPacks, and `positionalArgs` that don't map to a required declared
   parameter — so mistakes surface at `kubectl apply`, not at runtime.
 
+!!! note "Keeping tool definitions and the sidecar in sync"
+    Because the project's security model keeps tool definitions operator-authored on
+    the SkillPack (rather than letting the agent auto-register whatever the sidecar
+    advertises), **you own the parity** between the tools declared here and the
+    operations your sidecar actually implements. This is a deliberate trade-off — it
+    closes the forge-your-own-tools hole at the cost of a place where drift can creep
+    in. Treat the SkillPack as the contract: when you ship a sidecar build that adds,
+    renames, or changes an operation, update `sidecar.tools[]` in the same change. A
+    good pattern is a CI/CD step at the end of your sidecar build that patches the
+    SkillPack manifest (via `kubectl patch` or your IaC of choice) so the two never
+    diverge. Automated reconciliation is being explored — see
+    [#226](https://github.com/sympozium-ai/sympozium/pull/226).
+
 See [Native Sidecar Tools](writing-sidecars.md#native-sidecar-tools) for the full field
 reference, the trust model, and the matching `tool-executor.sh`.
 
