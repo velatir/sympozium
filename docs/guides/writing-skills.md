@@ -14,6 +14,7 @@ There are three layers to a skill, each optional beyond the first:
 |-------|-------------|-----------------|
 | **Skills** (Markdown) | Instructions the agent reads at `/skills/` | Always — this is the core of every SkillPack |
 | **Sidecar** (Container) | Runtime tools injected as a pod sidecar | When the skill needs binaries like `kubectl`, `helm`, `terraform` |
+| **Native tools** (optional) | Sidecar operations exposed to the model as typed, function-calling tools | When you want reliable invocation (esp. for small/non-Anthropic models) instead of hand-built shell strings |
 | **RBAC** (Roles) | Kubernetes permissions auto-provisioned per run | When the sidecar needs to talk to the Kubernetes API |
 | **Host access** (optional) | Explicit host namespace and hostPath mounts | When the sidecar must inspect node-local host files/devices |
 
@@ -205,6 +206,62 @@ spec:
 ```
 
 When the AgentRun controller sees this SkillPack in the run's skills list, it injects the sidecar as an additional container named `skill-<skillpack-name>`.
+
+---
+
+## Step 3b: Expose Native Tools (optional)
+
+By default your sidecar is reached through `execute_command`, where the model has to
+construct the full shell string itself. If your sidecar exposes a CLI with discrete
+operations, you can instead surface each operation to the model as a **typed,
+function-calling tool** — declared right here on the SkillPack, with no extra sidecar
+code. Smaller and non-Anthropic models are far more reliable filling in structured
+arguments than quoting a shell command.
+
+Declare tools under `spec.sidecar.tools[]`:
+
+```yaml
+  sidecar:
+    image: ghcr.io/yourorg/service-discovery:latest
+    mountWorkspace: true
+    tools:
+      - name: sd_evaluate_changes          # snake_case, unique across all tools
+        description: "Evaluate proposed changes for a service against the catalog."
+        exec: ["node", "/app/dist/cli.js"] # operator-declared executable (argv prefix)
+        subcommand: evaluate-changes        # appended after exec
+        inputMode: stdin                    # "args" (default) or "stdin"
+        positionalArgs: ["serviceIdentifier"]
+        parameters:                         # JSON Schema handed to the model
+          type: object
+          properties:
+            serviceIdentifier: { type: string }
+            catalog: { type: object }
+          required: [serviceIdentifier]
+```
+
+The model then calls `sd_evaluate_changes({serviceIdentifier: "web", catalog: {...}})`
+and the runtime runs `node /app/dist/cli.js evaluate-changes web` with
+`{"catalog": {...}}` piped on stdin — against this SkillPack's own sidecar.
+
+### What this means for you as a SkillPack author
+
+- **You stay in control of what runs.** The `exec` binary is declared here on the CRD,
+  not chosen by the model. The model only supplies arguments. The controller serializes
+  your tool definitions into a **read-only, immutable ConfigMap** mounted into the agent,
+  so a running agent can't forge or alter them.
+- **It grants no extra authority.** Dispatch uses the same gated exec IPC as
+  `execute_command`, and arguments are passed in *argv mode* (no shell) — a value like
+  `"; rm -rf /"` is delivered as one literal argument, never interpreted.
+- **Two caveats when authoring.** A positional value beginning with `-` is still handed
+  to your binary, so design your CLI to treat positionals as operands (honor `--`, or
+  validate values). And native tools need the **argv-aware `tool-executor.sh`** — rebuild
+  older sidecar images against the current executor before declaring tools.
+- **Admission-validated.** The webhook rejects malformed/colliding names, duplicate
+  names across SkillPacks, and `positionalArgs` that don't map to a required declared
+  parameter — so mistakes surface at `kubectl apply`, not at runtime.
+
+See [Native Sidecar Tools](writing-sidecars.md#native-sidecar-tools) for the full field
+reference, the trust model, and the matching `tool-executor.sh`.
 
 ---
 
@@ -461,6 +518,16 @@ spec:
     resources:
       cpu: "100m"
       memory: "128Mi"
+    tools:                       # optional: typed function-calling tools (see Step 3b)
+      - name: my_operation
+        description: "Run my operation against the catalog."
+        exec: ["my-cli"]
+        subcommand: run
+        parameters:
+          type: object
+          properties:
+            target: { type: string }
+          required: [target]
     rbac:
       - apiGroups: [""]
         resources: ["pods"]
