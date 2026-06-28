@@ -44,6 +44,33 @@ Every agent pod has these tools available out of the box (no skill sidecar requi
 !!! note
     **Native** tools run directly in the agent container. **IPC** tools communicate with sidecars or the IPC bridge via the shared `/ipc` volume. See the [Tool Authoring Guide](../guides/writing-tools.md) for how to add your own, or the [Sidecar Authoring Guide](../guides/writing-sidecars.md) to build a custom sidecar that processes IPC calls.
 
+## Native Sidecar Tools
+
+`execute_command` is universal, but it asks the model to hand-build a shell string —
+`execute_command(target="my-skill", command="node /app/cli.js evaluate web ...")`.
+Smaller and non-Anthropic models frequently get the quoting wrong. A **native sidecar
+tool** instead exposes a single sidecar operation to the model as a typed,
+function-calling tool with a JSON Schema. The model just fills in structured arguments
+(`sd_evaluate_changes({serviceIdentifier: "web"})`) and the runtime turns that into the
+right invocation against the owning sidecar.
+
+You declare these on the SkillPack itself, under `spec.sidecar.tools[]` — no extra
+sidecar code is required beyond the standard `tool-executor.sh`. The key idea is the
+**trust boundary**:
+
+- **Operator-authored, not agent-authored.** Tool definitions live on the SkillPack CRD.
+  The controller serializes them into a **read-only, immutable ConfigMap** mounted into
+  the agent. The agent consumes the manifest but cannot forge or alter it.
+- **The executable is declared, not chosen by the model.** The model only supplies
+  arguments; the binary that runs is fixed by the operator.
+- **No more authority than `execute_command`.** Dispatch flows through the same gated
+  exec IPC, and arguments are delivered in *argv mode* (no shell) — a value like
+  `"; rm -rf /"` is passed as one literal argument, never interpreted.
+
+A native tool therefore grants the model a cleaner interface, not more power. See
+[Native Sidecar Tools](../guides/writing-sidecars.md#native-sidecar-tools) for the full
+authoring reference and security model.
+
 ## Built-in SkillPacks
 
 | SkillPack | Category | Sidecar | Description | Status |
