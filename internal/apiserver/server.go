@@ -3339,6 +3339,7 @@ type GatewayMetricsResponse struct {
 	TotalRequests    int             `json:"totalRequests"`
 	SuccessCount     int             `json:"successCount"`
 	ErrorCount       int             `json:"errorCount"`
+	SkippedCount     int             `json:"skippedCount"`
 	AvgDurationSec   float64         `json:"avgDurationSec"`
 	UptimeSec        int64           `json:"uptimeSec"`
 	ServingInstances int             `json:"servingInstances"`
@@ -3412,9 +3413,12 @@ func (s *Server) getGatewayMetrics(w http.ResponseWriter, r *http.Request) {
 
 		resp.TotalRequests++
 		isFailed := run.Status.Phase == sympoziumv1alpha1.AgentRunPhaseFailed
-		if isFailed {
+		switch {
+		case isFailed:
 			resp.ErrorCount++
-		} else {
+		case run.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSkipped:
+			resp.SkippedCount++
+		default:
 			resp.SuccessCount++
 		}
 

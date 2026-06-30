@@ -391,6 +391,186 @@ func TestBuildVolumes_IPCUsesMemory(t *testing.T) {
 	t.Error("ipc volume not found")
 }
 
+// ── skipRun ──────────────────────────────────────────────────────────────────
+
+func TestSkipRun_MarksSkippedTerminal(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sympoziumv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add sympozium scheme: %v", err)
+	}
+
+	run := &sympoziumv1alpha1.AgentRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-skip", Namespace: "default"},
+		Spec:       sympoziumv1alpha1.AgentRunSpec{AgentRef: "demo"},
+		Status:     sympoziumv1alpha1.AgentRunStatus{Phase: sympoziumv1alpha1.AgentRunPhaseRunning},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(run).
+		WithStatusSubresource(&sympoziumv1alpha1.AgentRun{}).
+		Build()
+
+	r := &AgentRunReconciler{Client: cl, Scheme: scheme, Log: logr.Discard()}
+
+	if _, err := r.skipRun(context.Background(), run, "no work to do"); err != nil {
+		t.Fatalf("skipRun returned error: %v", err)
+	}
+
+	var got sympoziumv1alpha1.AgentRun
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "run-skip", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.Status.Phase != sympoziumv1alpha1.AgentRunPhaseSkipped {
+		t.Fatalf("phase = %q, want %q", got.Status.Phase, sympoziumv1alpha1.AgentRunPhaseSkipped)
+	}
+	if got.Status.Result != "no work to do" {
+		t.Fatalf("result = %q, want %q", got.Status.Result, "no work to do")
+	}
+	if got.Status.CompletedAt == nil {
+		t.Fatal("expected CompletedAt to be set")
+	}
+}
+
+// ── pruneOldRuns ─────────────────────────────────────────────────────────────
+
+// TestPruneOldRuns_PrunesSkippedRuns guards against skipped runs accumulating
+// indefinitely: they are terminal and (given this feature exists to skip often)
+// grow fastest, so they must be eligible for history-limit pruning alongside
+// Succeeded/Failed runs.
+func TestPruneOldRuns_PrunesSkippedRuns(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sympoziumv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add sympozium scheme: %v", err)
+	}
+
+	const instance = "demo"
+	base := time.Now().Add(-time.Hour)
+
+	mkRun := func(name, phase string, ageOffset time.Duration) *sympoziumv1alpha1.AgentRun {
+		return &sympoziumv1alpha1.AgentRun{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				Namespace:         "default",
+				CreationTimestamp: metav1.NewTime(base.Add(ageOffset)),
+				Labels:            map[string]string{"sympozium.ai/instance": instance},
+			},
+			Spec:   sympoziumv1alpha1.AgentRunSpec{AgentRef: instance},
+			Status: sympoziumv1alpha1.AgentRunStatus{Phase: sympoziumv1alpha1.AgentRunPhase(phase)},
+		}
+	}
+
+	// 4 terminal runs (oldest → newest): two skipped, then a failed, then a
+	// succeeded. With a history limit of 2 the two oldest (both Skipped) must be
+	// pruned. Before the fix Skipped runs were never collected, so nothing would
+	// be pruned at all.
+	runs := []*sympoziumv1alpha1.AgentRun{
+		mkRun("skip-old", "Skipped", 0),
+		mkRun("skip-old2", "Skipped", time.Minute),
+		mkRun("failed", "Failed", 2*time.Minute),
+		mkRun("succeeded", "Succeeded", 3*time.Minute),
+		// A still-running run for the same instance must never be pruned.
+		mkRun("running", "Running", 4*time.Minute),
+	}
+
+	objs := make([]client.Object, len(runs))
+	for i, r := range runs {
+		objs[i] = r
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		Build()
+
+	r := &AgentRunReconciler{Client: cl, Scheme: scheme, Log: logr.Discard(), RunHistoryLimit: 2}
+
+	if err := r.pruneOldRuns(context.Background(), logr.Discard(), runs[0]); err != nil {
+		t.Fatalf("pruneOldRuns returned error: %v", err)
+	}
+
+	var remaining sympoziumv1alpha1.AgentRunList
+	if err := cl.List(context.Background(), &remaining, client.InNamespace("default")); err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, run := range remaining.Items {
+		got[run.Name] = true
+	}
+
+	// The two oldest skipped runs are pruned; the rest survive.
+	for _, name := range []string{"failed", "succeeded", "running"} {
+		if !got[name] {
+			t.Errorf("expected %q to survive pruning", name)
+		}
+	}
+	for _, name := range []string{"skip-old", "skip-old2"} {
+		if got[name] {
+			t.Errorf("expected oldest skipped run %q to be pruned", name)
+		}
+	}
+}
+
+// ── reconcileAwaitingDelegate ────────────────────────────────────────────────
+
+// TestReconcileAwaitingDelegate_PropagatesSkipReason verifies a skipped delegate
+// child (terminal, not failed) surfaces its skip reason into the parent's
+// delegate entry rather than dropping it, and that the parent recovers to
+// Running so it can pick the result up.
+func TestReconcileAwaitingDelegate_PropagatesSkipReason(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sympoziumv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add sympozium scheme: %v", err)
+	}
+
+	parent := &sympoziumv1alpha1.AgentRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+		Spec:       sympoziumv1alpha1.AgentRunSpec{AgentRef: "demo"},
+		Status: sympoziumv1alpha1.AgentRunStatus{
+			Phase: sympoziumv1alpha1.AgentRunPhaseAwaitingDelegate,
+			Delegates: []sympoziumv1alpha1.DelegateStatus{
+				{ChildRunName: "child-skip"},
+			},
+		},
+	}
+	child := &sympoziumv1alpha1.AgentRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-skip", Namespace: "default"},
+		Spec:       sympoziumv1alpha1.AgentRunSpec{AgentRef: "demo"},
+		Status: sympoziumv1alpha1.AgentRunStatus{
+			Phase:  sympoziumv1alpha1.AgentRunPhaseSkipped,
+			Result: "queue empty",
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(parent, child).
+		WithStatusSubresource(&sympoziumv1alpha1.AgentRun{}).
+		Build()
+
+	r := &AgentRunReconciler{Client: cl, Scheme: scheme, Log: logr.Discard()}
+
+	if _, err := r.reconcileAwaitingDelegate(context.Background(), logr.Discard(), parent); err != nil {
+		t.Fatalf("reconcileAwaitingDelegate returned error: %v", err)
+	}
+
+	var got sympoziumv1alpha1.AgentRun
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "parent", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if len(got.Status.Delegates) != 1 {
+		t.Fatalf("expected 1 delegate, got %d", len(got.Status.Delegates))
+	}
+	if got.Status.Delegates[0].Result != "queue empty" {
+		t.Fatalf("delegate result = %q, want skip reason %q", got.Status.Delegates[0].Result, "queue empty")
+	}
+	// All delegates terminal and none failed → parent recovers to Running.
+	if got.Status.Phase != sympoziumv1alpha1.AgentRunPhaseRunning {
+		t.Fatalf("parent phase = %q, want %q", got.Status.Phase, sympoziumv1alpha1.AgentRunPhaseRunning)
+	}
+}
+
 // ── result parsing tests ─────────────────────────────────────────────────────
 
 func TestParseAgentResultFromLogs_Success(t *testing.T) {
@@ -399,7 +579,10 @@ func TestParseAgentResultFromLogs_Success(t *testing.T) {
 		`{"status":"success","response":"all good","metrics":{"durationMs":1200,"inputTokens":10,"outputTokens":20,"toolCalls":1}}` +
 		"__SYMPOZIUM_END__\n"
 
-	result, errMsg, usage := parseAgentResultFromLogs(logs, logr.Discard())
+	result, errMsg, usage, skipped := parseAgentResultFromLogs(logs, logr.Discard())
+	if skipped {
+		t.Fatal("did not expect skipped")
+	}
 	if errMsg != "" {
 		t.Fatalf("unexpected error message: %q", errMsg)
 	}
@@ -420,7 +603,10 @@ func TestParseAgentResultFromLogs_Error(t *testing.T) {
 		fmt.Sprintf(`{"status":"error","error":%q,"metrics":{"durationMs":123}}`, want) +
 		"__SYMPOZIUM_END__\n"
 
-	result, errMsg, usage := parseAgentResultFromLogs(logs, logr.Discard())
+	result, errMsg, usage, skipped := parseAgentResultFromLogs(logs, logr.Discard())
+	if skipped {
+		t.Fatal("did not expect skipped")
+	}
 	if result != "" {
 		t.Fatalf("expected empty result, got %q", result)
 	}
@@ -429,6 +615,39 @@ func TestParseAgentResultFromLogs_Error(t *testing.T) {
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage on error, got %+v", usage)
+	}
+}
+
+func TestParseAgentResultFromLogs_Skipped(t *testing.T) {
+	logs := "noise\n" +
+		"__SYMPOZIUM_RESULT__" +
+		`{"status":"skipped","response":"no new items in queue"}` +
+		"__SYMPOZIUM_END__\n"
+
+	result, errMsg, usage, skipped := parseAgentResultFromLogs(logs, logr.Discard())
+	if !skipped {
+		t.Fatal("expected skipped=true")
+	}
+	if errMsg != "" {
+		t.Fatalf("unexpected error message: %q", errMsg)
+	}
+	if result != "no new items in queue" {
+		t.Fatalf("reason = %q, want %q", result, "no new items in queue")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage on skip, got %+v", usage)
+	}
+}
+
+func TestParseAgentResultFromLogs_SkippedDefaultReason(t *testing.T) {
+	logs := "__SYMPOZIUM_RESULT__" + `{"status":"skipped"}` + "__SYMPOZIUM_END__\n"
+
+	result, _, _, skipped := parseAgentResultFromLogs(logs, logr.Discard())
+	if !skipped {
+		t.Fatal("expected skipped=true")
+	}
+	if result == "" {
+		t.Fatal("expected a default skip reason, got empty")
 	}
 }
 
@@ -456,7 +675,7 @@ func TestParseAgentResultFromLogs_MarkerBeyondOldTailLimit(t *testing.T) {
 	b.WriteString(`{"status":"success","response":"the final report","metrics":{"durationMs":5000,"inputTokens":100,"outputTokens":50,"toolCalls":200}}`)
 	b.WriteString("__SYMPOZIUM_END__\n")
 
-	result, errMsg, usage := parseAgentResultFromLogs(b.String(), logr.Discard())
+	result, errMsg, usage, _ := parseAgentResultFromLogs(b.String(), logr.Discard())
 	if errMsg != "" {
 		t.Fatalf("unexpected error: %s", errMsg)
 	}
@@ -473,7 +692,7 @@ func TestParseAgentResultFromLogs_LongMultilineResponse(t *testing.T) {
 	payload := fmt.Sprintf(`{"status":"success","response":%q,"metrics":{"durationMs":3000,"inputTokens":50,"outputTokens":100,"toolCalls":5}}`, longResponse)
 	logs := "__SYMPOZIUM_RESULT__" + payload + "__SYMPOZIUM_END__\n"
 
-	result, errMsg, _ := parseAgentResultFromLogs(logs, logr.Discard())
+	result, errMsg, _, _ := parseAgentResultFromLogs(logs, logr.Discard())
 	if errMsg != "" {
 		t.Fatalf("unexpected error: %s", errMsg)
 	}

@@ -270,11 +270,15 @@ const (
 	AgentRunPhaseAwaitingDelegate AgentRunPhase = "AwaitingDelegate"
 	AgentRunPhaseSucceeded        AgentRunPhase = "Succeeded"
 	AgentRunPhaseFailed           AgentRunPhase = "Failed"
+	// AgentRunPhaseSkipped is a terminal phase for runs a preRun lifecycle
+	// hook skipped (no work to do). The agent never made an LLM call, so the
+	// run consumed no tokens; it is distinct from Succeeded and Failed.
+	AgentRunPhaseSkipped AgentRunPhase = "Skipped"
 )
 
 // AgentRunStatus defines the observed state of AgentRun.
 type AgentRunStatus struct {
-	// Phase is the current phase (Pending, Running, Succeeded, Failed).
+	// Phase is the current phase (Pending, Running, Succeeded, Failed, Skipped).
 	// +optional
 	Phase AgentRunPhase `json:"phase,omitempty"`
 

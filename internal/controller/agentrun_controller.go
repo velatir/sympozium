@@ -41,6 +41,7 @@ import (
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
+	"github.com/sympozium-ai/sympozium/internal/ipc"
 	"github.com/sympozium-ai/sympozium/internal/orchestrator"
 	"github.com/sympozium-ai/sympozium/pkg/sidecartools"
 	"gopkg.in/yaml.v3"
@@ -245,7 +246,8 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// we create an infinite remove→add→remove loop.
 	// Serving-mode runs are long-lived and also need a finalizer.
 	isTerminal := agentRun.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSucceeded ||
-		agentRun.Status.Phase == sympoziumv1alpha1.AgentRunPhaseFailed
+		agentRun.Status.Phase == sympoziumv1alpha1.AgentRunPhaseFailed ||
+		agentRun.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSkipped
 	if !isTerminal && !controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
 		controllerutil.AddFinalizer(agentRun, agentRunFinalizer)
 		if err := r.Update(ctx, agentRun); err != nil {
@@ -272,7 +274,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		result, err = r.reconcileServing(ctx, log, agentRun)
 	case sympoziumv1alpha1.AgentRunPhaseAwaitingDelegate:
 		result, err = r.reconcileAwaitingDelegate(ctx, log, agentRun)
-	case sympoziumv1alpha1.AgentRunPhaseSucceeded, sympoziumv1alpha1.AgentRunPhaseFailed:
+	case sympoziumv1alpha1.AgentRunPhaseSucceeded, sympoziumv1alpha1.AgentRunPhaseFailed, sympoziumv1alpha1.AgentRunPhaseSkipped:
 		result, err = r.reconcileCompleted(ctx, log, agentRun)
 	default:
 		log.Info("Unknown phase", "phase", agentRun.Status.Phase)
@@ -625,7 +627,8 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 			if getErr := reader.Get(ctx, client.ObjectKeyFromObject(agentRun), fresh); getErr == nil {
 				switch fresh.Status.Phase {
 				case sympoziumv1alpha1.AgentRunPhaseSucceeded,
-					sympoziumv1alpha1.AgentRunPhaseFailed:
+					sympoziumv1alpha1.AgentRunPhaseFailed,
+					sympoziumv1alpha1.AgentRunPhaseSkipped:
 					// Already terminal — don't override.
 					return ctrl.Result{}, nil
 				case sympoziumv1alpha1.AgentRunPhasePostRunning:
@@ -665,7 +668,12 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 	// Check Job completion
 	if job.Status.Succeeded > 0 {
 		// Extract the LLM response from pod logs before the pod is gone.
-		result, _, usage := r.extractResultFromPod(ctx, log, agentRun)
+		result, _, usage, skipped := r.extractResultFromPod(ctx, log, agentRun)
+		// A preRun hook skipped the run before any LLM call: postRun hooks and
+		// memory persistence are bypassed — there was no work or output.
+		if skipped {
+			return r.skipRun(ctx, agentRun, result)
+		}
 		// Extract and persist memory updates if applicable.
 		r.extractAndPersistMemory(ctx, log, agentRun)
 		if hasPostRunHooks {
@@ -677,7 +685,10 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 		// The Job may report failure because a non-agent container (e.g. ipc-bridge)
 		// exited non-zero. Check if the agent itself succeeded via structured result
 		// markers in pod logs — if so, treat it as success.
-		result, podErr, usage := r.extractResultFromPod(ctx, log, agentRun)
+		result, podErr, usage, skipped := r.extractResultFromPod(ctx, log, agentRun)
+		if skipped {
+			return r.skipRun(ctx, agentRun, result)
+		}
 		if result != "" && podErr == "" {
 			log.Info("Job failed but agent produced a success result; treating as success")
 			r.extractAndPersistMemory(ctx, log, agentRun)
@@ -709,10 +720,13 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 		if done, exitCode, reason, hasSidecars := r.checkAgentContainer(ctx, log, agentRun); done && hasSidecars {
 			if exitCode == 0 {
 				log.Info("Agent container terminated successfully; cleaning up lingering sidecars")
-				result, _, usage := r.extractResultFromPod(ctx, log, agentRun)
-				r.extractAndPersistMemory(ctx, log, agentRun)
+				result, _, usage, skipped := r.extractResultFromPod(ctx, log, agentRun)
 				// Delete the Job so Kubernetes kills remaining sidecar containers.
 				_ = r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))
+				if skipped {
+					return r.skipRun(ctx, agentRun, result)
+				}
+				r.extractAndPersistMemory(ctx, log, agentRun)
 				if hasPostRunHooks {
 					return r.startPostRun(ctx, log, agentRun, 0, result, usage)
 				}
@@ -724,7 +738,7 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 			}
 			log.Info("Agent container terminated with error; cleaning up", "exitCode", exitCode, "reason", reason)
 			// Try to extract the error from pod logs before cleaning up.
-			if _, logErr, _ := r.extractResultFromPod(ctx, log, agentRun); logErr != "" {
+			if _, logErr, _, _ := r.extractResultFromPod(ctx, log, agentRun); logErr != "" {
 				errMsg = logErr
 			}
 			r.extractAndPersistMemory(ctx, log, agentRun)
@@ -865,7 +879,7 @@ func (r *AgentRunReconciler) reconcileAwaitingDelegate(ctx context.Context, log 
 			// Sync delegate status from the actual child.
 			agentRun.Status.Delegates[i].Phase = childRun.Status.Phase
 			switch childRun.Status.Phase {
-			case sympoziumv1alpha1.AgentRunPhaseSucceeded, sympoziumv1alpha1.AgentRunPhaseFailed:
+			case sympoziumv1alpha1.AgentRunPhaseSucceeded, sympoziumv1alpha1.AgentRunPhaseFailed, sympoziumv1alpha1.AgentRunPhaseSkipped:
 				// Terminal.
 			default:
 				allTerminal = false
@@ -876,7 +890,11 @@ func (r *AgentRunReconciler) reconcileAwaitingDelegate(ctx context.Context, log 
 					agentRun.Status.Delegates[i].Error = childRun.Status.Error
 				}
 			}
-			if childRun.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSucceeded {
+			// Succeeded and Skipped both surface their text via Status.Result —
+			// a skipped delegate stores its skip reason there, so propagate it to
+			// the parent entry rather than dropping it.
+			if childRun.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSucceeded ||
+				childRun.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSkipped {
 				if agentRun.Status.Delegates[i].Result == "" {
 					agentRun.Status.Delegates[i].Result = childRun.Status.Result
 				}
@@ -1106,10 +1124,12 @@ func (r *AgentRunReconciler) pruneOldRuns(ctx context.Context, log logr.Logger, 
 		return fmt.Errorf("listing runs for instance %s: %w", instanceRef, err)
 	}
 
-	// Collect only completed (Succeeded/Failed) runs.
+	// Collect only completed (Succeeded/Failed/Skipped) runs. Skipped runs are
+	// terminal too and accumulate fastest (this feature exists to skip often),
+	// so they must be eligible for history-limit pruning.
 	var completed []sympoziumv1alpha1.AgentRun
 	for _, run := range allRuns.Items {
-		if run.Status.Phase == "Succeeded" || run.Status.Phase == "Failed" {
+		if run.Status.Phase == "Succeeded" || run.Status.Phase == "Failed" || run.Status.Phase == "Skipped" {
 			completed = append(completed, run)
 		}
 	}
@@ -3395,6 +3415,39 @@ func (r *AgentRunReconciler) succeedRun(ctx context.Context, agentRun *sympozium
 	return ctrl.Result{}, nil
 }
 
+// skipRun marks an AgentRun as Skipped: a preRun lifecycle hook determined
+// there was no work to do, so the agent never made an LLM call. This is a
+// terminal, non-error outcome distinct from Succeeded and Failed; postRun
+// hooks are bypassed by the caller. The reason (from the skip marker) is stored
+// in Status.Result for visibility.
+func (r *AgentRunReconciler) skipRun(ctx context.Context, agentRun *sympoziumv1alpha1.AgentRun, reason string) (ctrl.Result, error) {
+	now := metav1.Now()
+
+	err := r.updateStatusWithRetry(ctx, agentRun, func(ar *sympoziumv1alpha1.AgentRun) {
+		ar.Status.Phase = sympoziumv1alpha1.AgentRunPhaseSkipped
+		ar.Status.CompletedAt = &now
+		ar.Status.Result = reason
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Record run metrics tagged as skipped so saved LLM calls are measurable.
+	runAttrs := metric.WithAttributes(
+		attribute.String("sympozium.agent.status", "skipped"),
+		attribute.String("sympozium.instance", agentRun.Spec.AgentRef),
+	)
+	agentRunsTotal.Add(ctx, 1, runAttrs)
+
+	slog.InfoContext(ctx, "agent.run.skipped",
+		"agent_run", agentRun.Name,
+		"instance", agentRun.Spec.AgentRef,
+		"reason", reason,
+	)
+
+	return ctrl.Result{}, nil
+}
+
 const (
 	resultMarkerStart = "__SYMPOZIUM_RESULT__"
 	resultMarkerEnd   = "__SYMPOZIUM_END__"
@@ -3402,11 +3455,13 @@ const (
 
 // extractResultFromPod reads the agent container logs and looks for the
 // structured result marker written by agent-runner.
-// Returns (result, errorMessage, tokenUsage). For failed runs, errorMessage is
-// populated from the structured marker when available.
-func (r *AgentRunReconciler) extractResultFromPod(ctx context.Context, log logr.Logger, agentRun *sympoziumv1alpha1.AgentRun) (string, string, *sympoziumv1alpha1.TokenUsage) {
+// Returns (result, errorMessage, tokenUsage, skipped). For failed runs,
+// errorMessage is populated from the structured marker when available. skipped
+// is true when a preRun lifecycle hook short-circuited the run before any LLM
+// call, in which case result carries the skip reason.
+func (r *AgentRunReconciler) extractResultFromPod(ctx context.Context, log logr.Logger, agentRun *sympoziumv1alpha1.AgentRun) (string, string, *sympoziumv1alpha1.TokenUsage, bool) {
 	if r.Clientset == nil || agentRun.Status.PodName == "" {
-		return "", "", nil
+		return "", "", nil, false
 	}
 
 	tailLines := int64(500)
@@ -3418,33 +3473,35 @@ func (r *AgentRunReconciler) extractResultFromPod(ctx context.Context, log logr.
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		log.V(1).Info("could not read pod logs for result", "err", err)
-		return "", "", nil
+		return "", "", nil, false
 	}
 	defer stream.Close()
 
 	raw, err := io.ReadAll(stream)
 	if err != nil {
 		log.V(1).Info("error reading pod logs", "err", err)
-		return "", "", nil
+		return "", "", nil, false
 	}
 
 	return parseAgentResultFromLogs(string(raw), log)
 }
 
 // parseAgentResultFromLogs parses the structured result marker emitted by the
-// agent-runner and extracts either the success response or the failure message.
-func parseAgentResultFromLogs(logs string, log logr.Logger) (string, string, *sympoziumv1alpha1.TokenUsage) {
+// agent-runner and extracts the success response, failure message, or — when a
+// preRun hook skipped the run — the skip reason (skipped=true). The returned
+// string carries the response on success and the skip reason when skipped.
+func parseAgentResultFromLogs(logs string, log logr.Logger) (result string, errMsg string, usage *sympoziumv1alpha1.TokenUsage, skipped bool) {
 	startIdx := strings.LastIndex(logs, resultMarkerStart)
 	if startIdx < 0 {
 		if fallbackErr := extractLikelyProviderErrorFromLogs(logs); fallbackErr != "" {
-			return "", fallbackErr, nil
+			return "", fallbackErr, nil, false
 		}
-		return "", "", nil
+		return "", "", nil, false
 	}
 	payload := logs[startIdx+len(resultMarkerStart):]
 	endIdx := strings.Index(payload, resultMarkerEnd)
 	if endIdx < 0 {
-		return "", "", nil
+		return "", "", nil, false
 	}
 	jsonStr := strings.TrimSpace(payload[:endIdx])
 
@@ -3462,10 +3519,18 @@ func parseAgentResultFromLogs(logs string, log logr.Logger) (string, string, *sy
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
 		log.V(1).Info("could not parse result JSON", "err", err)
-		return "", "", nil
+		return "", "", nil, false
 	}
 
-	var usage *sympoziumv1alpha1.TokenUsage
+	// A preRun hook short-circuited the run before any LLM call.
+	if parsed.Status == ipc.ResultStatusSkipped {
+		reason := strings.TrimSpace(parsed.Response)
+		if reason == "" {
+			reason = "preRun hook requested skip"
+		}
+		return reason, "", nil, true
+	}
+
 	if parsed.Metrics.InputTokens > 0 || parsed.Metrics.OutputTokens > 0 {
 		usage = &sympoziumv1alpha1.TokenUsage{
 			InputTokens:  parsed.Metrics.InputTokens,
@@ -3487,10 +3552,10 @@ func parseAgentResultFromLogs(logs string, log logr.Logger) (string, string, *sy
 		if msg == "" {
 			msg = "agent run failed"
 		}
-		return "", msg, nil
+		return "", msg, nil, false
 	}
 
-	return parsed.Response, "", usage
+	return parsed.Response, "", usage, false
 }
 
 // extractLikelyProviderErrorFromLogs scans plain log lines for provider quota

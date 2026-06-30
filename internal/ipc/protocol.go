@@ -4,6 +4,19 @@ import "encoding/json"
 
 // Protocol types for IPC file-based communication.
 
+// SkipMarkerPath is the file a preRun lifecycle hook writes to skip the run.
+// PreRun hooks execute as init containers in the same Pod as the agent and
+// share the /ipc volume. A hook that determines there is no work to do writes
+// this file and exits 0 (a non-zero exit would fail the whole Pod). The
+// agent-runner reads it before the LLM call and short-circuits the run without
+// spending tokens; the controller then marks the AgentRun as Skipped. Any
+// content written to the file is surfaced as the human-readable skip reason.
+const SkipMarkerPath = "/ipc/control/skip"
+
+// ResultStatusSkipped is the AgentResult.Status value emitted when a run is
+// skipped via SkipMarkerPath, distinguishing it from "success" and "error".
+const ResultStatusSkipped = "skipped"
+
 // TaskInput is written to /ipc/input/task.json by the orchestrator.
 type TaskInput struct {
 	Task         string          `json:"task"`
@@ -24,7 +37,7 @@ type ModelConfig struct {
 
 // AgentResult is written to /ipc/output/result.json by the agent on completion.
 type AgentResult struct {
-	Status   string `json:"status"` // "success" or "error"
+	Status   string `json:"status"` // "success", "error", or "skipped" (see ResultStatusSkipped)
 	Response string `json:"response,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Metrics  struct {

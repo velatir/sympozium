@@ -35,6 +35,8 @@ export function phaseColor(phase: string | undefined): string {
     case "failed":
     case "error":
       return "phase-failed";
+    case "skipped":
+      return "phase-skipped";
     case "pending":
       return "phase-pending";
     case "downloading":

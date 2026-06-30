@@ -2703,7 +2703,7 @@ spec:
                 type: string
               phase:
                 description: Phase is the current phase (Pending, Running, Succeeded,
-                  Failed).
+                  Failed, Skipped).
                 type: string
               podName:
                 description: PodName is the name of the pod running this agent.

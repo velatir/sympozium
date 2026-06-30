@@ -1158,3 +1158,45 @@ func TestDefaultTools_AlwaysIncludesCoreTool(t *testing.T) {
 		t.Error("delegate_to_persona tool should always be registered")
 	}
 }
+
+func TestReadSkipMarker(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("absent marker is not a skip", func(t *testing.T) {
+		reason, skip := readSkipMarker(filepath.Join(dir, "missing"))
+		if skip {
+			t.Fatalf("expected skip=false for missing marker, got reason=%q", reason)
+		}
+		if reason != "" {
+			t.Fatalf("expected empty reason, got %q", reason)
+		}
+	})
+
+	t.Run("marker with reason", func(t *testing.T) {
+		path := filepath.Join(dir, "skip-reason")
+		if err := os.WriteFile(path, []byte("  no new items in queue\n"), 0o644); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+		reason, skip := readSkipMarker(path)
+		if !skip {
+			t.Fatal("expected skip=true")
+		}
+		if reason != "no new items in queue" {
+			t.Fatalf("reason = %q, want trimmed %q", reason, "no new items in queue")
+		}
+	})
+
+	t.Run("empty marker yields default reason", func(t *testing.T) {
+		path := filepath.Join(dir, "skip-empty")
+		if err := os.WriteFile(path, []byte("   \n"), 0o644); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+		reason, skip := readSkipMarker(path)
+		if !skip {
+			t.Fatal("expected skip=true even with empty contents")
+		}
+		if reason == "" {
+			t.Fatal("expected a non-empty default reason")
+		}
+	})
+}

@@ -32,6 +32,37 @@ PreRun hooks execute as **init containers** before the agent starts. They have a
 
 **Use cases:** Fetch incident context from PagerDuty, clone a git repo, download test data, warm caches.
 
+#### Skipping a run
+
+A preRun hook can **skip the run entirely** when there is no work to do — for
+example, a hook that polls a queue or inbox and finds it empty. This avoids the
+LLM call and its token cost.
+
+To skip, the hook writes the marker file `/ipc/control/skip` and exits `0`. Any
+text written to the file is recorded as the human-readable skip reason. The
+agent container then short-circuits before any LLM call, and the AgentRun lands
+in the terminal **`Skipped`** phase (distinct from `Succeeded`/`Failed`).
+
+```yaml
+spec:
+  lifecycle:
+    preRun:
+      - name: check-queue
+        image: curlimages/curl:latest
+        command: ["sh", "-c",
+          "test -s /workspace/queue.json || echo 'queue empty' > /ipc/control/skip"]
+```
+
+Notes:
+
+- **Exit `0`, don't fail.** A non-zero exit fails the whole Pod (standard init
+  container behavior) and marks the run `Failed` — that is *not* a skip.
+- When a run is skipped, **postRun hooks are bypassed** (including gate hooks)
+  and memory is not persisted — there was no agent output to process.
+- Channel-triggered runs that are skipped send **no reply** (the skip is silent).
+- Skipped runs are counted separately from successes/failures in gateway metrics
+  (`skippedCount`).
+
 ### PostRun Hooks
 
 PostRun hooks execute in a **follow-up Job** after the agent completes. They receive everything preRun hooks get, plus:
@@ -299,3 +330,5 @@ With lifecycle hooks, the AgentRun phase transitions become:
 `Pending` → `Running` → `PostRunning` → `Succeeded` (or `Failed`)
 
 The `PostRunning` phase is only entered when `postRun` hooks are defined. Without them, the flow is the standard `Pending` → `Running` → `Succeeded`/`Failed`.
+
+When a preRun hook [skips the run](#skipping-a-run), the flow short-circuits to the terminal `Skipped` phase: `Pending` → `Running` → `Skipped` (postRun hooks are bypassed).

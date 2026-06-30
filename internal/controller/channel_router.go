@@ -21,6 +21,7 @@ import (
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	channelpkg "github.com/sympozium-ai/sympozium/internal/channel"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
+	"github.com/sympozium-ai/sympozium/internal/ipc"
 )
 
 var routerTracer = otel.Tracer("sympozium.ai/channel-router")
@@ -401,6 +402,13 @@ func (cr *ChannelRouter) handleCompleted(ctx context.Context, event *eventbus.Ev
 	var result agentResult
 	if err := json.Unmarshal(event.Data, &result); err != nil {
 		cr.Log.Error(err, "failed to unmarshal agent result")
+		return
+	}
+
+	// A preRun hook skipped the run (no work to do) — stay silent rather than
+	// posting the skip reason back to the channel.
+	if result.Status == ipc.ResultStatusSkipped {
+		cr.Log.Info("Skipped run — no channel reply", "run", run.Name)
 		return
 	}
 

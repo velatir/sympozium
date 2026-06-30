@@ -2823,6 +2823,12 @@ func (m tuiModel) buildConversationContext(instName string) string {
 			sb.WriteString(fmt.Sprintf("Assistant: %s\n", r.Status.Result))
 		} else if phase == "Failed" {
 			sb.WriteString(fmt.Sprintf("Assistant: [error: %s]\n", r.Status.Error))
+		} else if phase == "Skipped" {
+			reason := r.Status.Result
+			if reason == "" {
+				reason = "no work to do"
+			}
+			sb.WriteString(fmt.Sprintf("Assistant: [skipped: %s]\n", reason))
 		} else {
 			sb.WriteString("Assistant: [pending]\n")
 		}
@@ -5748,7 +5754,7 @@ func fetchRunSuggestions(ns, prefix string, activeOnly bool) []suggestion {
 		if phase == "" {
 			phase = "Pending"
 		}
-		if activeOnly && (phase == "Completed" || phase == "Failed") {
+		if activeOnly && (phase == "Completed" || phase == "Failed" || phase == "Skipped") {
 			continue
 		}
 		if prefix == "" || strings.HasPrefix(strings.ToLower(run.Name), prefix) {
@@ -6578,6 +6584,8 @@ func (m tuiModel) renderRunsTable(tableH int) string {
 				phaseCol = tuiSuccessStyle.Render(fmt.Sprintf("%-12s ", phase))
 			case phase == "Failed" || phase == "Timeout":
 				phaseCol = tuiErrorStyle.Render(fmt.Sprintf("%-12s ", phase))
+			case phase == "Skipped":
+				phaseCol = tuiDimStyle.Render(fmt.Sprintf("%-12s ", phase))
 			case phase == "Pending":
 				phaseCol = tuiPendingStyle.Render(fmt.Sprintf("%-12s ", phase))
 			case phase == "Serving":
@@ -6851,6 +6859,8 @@ func (m tuiModel) renderPodsTable(tableH int) string {
 				phaseCol = tuiSuccessStyle.Render(fmt.Sprintf("%-12s ", p.Phase))
 			case "Failed":
 				phaseCol = tuiErrorStyle.Render(fmt.Sprintf("%-12s ", p.Phase))
+			case "Skipped":
+				phaseCol = tuiDimStyle.Render(fmt.Sprintf("%-12s ", p.Phase))
 			case "Pending":
 				phaseCol = tuiPendingStyle.Render(fmt.Sprintf("%-12s ", p.Phase))
 			default:
@@ -7365,6 +7375,8 @@ func (m tuiModel) renderDetailSkillRuns(width, height int) string {
 		switch phase {
 		case "Succeeded", "Completed":
 			phaseStyle = tuiSuccessStyle
+		case "Skipped":
+			phaseStyle = tuiDimStyle
 		case "Running":
 			phaseStyle = tuiRunningStyle
 		case "Failed", "Timeout":
@@ -7581,6 +7593,14 @@ func (m tuiModel) renderDetailFeed(width, height int) string {
 				allLines = append(allLines, tuiDimStyle.Render(fmt.Sprintf("   ⟠ %d in / %d out │ %d tools │ %dms",
 					u.InputTokens, u.OutputTokens, u.ToolCalls, u.DurationMs)))
 			}
+		case "Skipped":
+			skipMsg := run.Status.Result
+			if skipMsg == "" {
+				skipMsg = "Skipped"
+			}
+			for _, wl := range wrapText(skipMsg, contentW) {
+				allLines = append(allLines, tuiDimStyle.Render("   ⊘ "+wl))
+			}
 		case "Running":
 			allLines = append(allLines, tuiRunningStyle.Render("   ⏳ Running..."))
 		case "PostRunning":
@@ -7716,6 +7736,14 @@ func (m tuiModel) renderDetailPaneFullscreen() string {
 					}
 				} else {
 					allLines = append(allLines, tuiSuccessStyle.Render("   ✓ Completed"))
+				}
+			case "Skipped":
+				skipMsg := run.Status.Result
+				if skipMsg == "" {
+					skipMsg = "Skipped"
+				}
+				for _, wl := range wrapText(skipMsg, contentW) {
+					allLines = append(allLines, tuiDimStyle.Render("   ⊘ "+wl))
 				}
 			case "Running":
 				allLines = append(allLines, tuiRunningStyle.Render("   ⏳ Running..."))
@@ -8567,7 +8595,7 @@ func tuiAbortRun(ns, name string) (string, error) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &run); err != nil {
 		return "", fmt.Errorf("run %q not found: %w", name, err)
 	}
-	if run.Status.Phase == "Completed" || run.Status.Phase == "Failed" {
+	if run.Status.Phase == "Completed" || run.Status.Phase == "Failed" || run.Status.Phase == "Skipped" {
 		return tuiDimStyle.Render(fmt.Sprintf("Run %s already %s", name, run.Status.Phase)), nil
 	}
 	if err := k8sClient.Delete(ctx, &run); err != nil {
@@ -8658,7 +8686,7 @@ func tuiClusterStatus(ns string) (string, error) {
 		switch r.Status.Phase {
 		case "Running":
 			running++
-		case "Completed":
+		case "Completed", "Skipped":
 			completed++
 		case "Failed", "Timeout":
 			failed++

@@ -73,6 +73,13 @@ export function useRunNotifications() {
             : truncateTask(run),
           duration: 8000,
         });
+      } else if (phase === "Skipped") {
+        toast.info(`Run skipped: ${shortName(name)}`, {
+          description: run.status?.result
+            ? run.status.result.slice(0, 120)
+            : "A preRun hook skipped this run (no work to do).",
+          duration: 5000,
+        });
       }
     }
 

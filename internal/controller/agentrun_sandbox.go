@@ -322,7 +322,10 @@ func (r *AgentRunReconciler) reconcileRunningAgentSandbox(
 
 	case "Completed", "Succeeded":
 		log.Info("Agent Sandbox completed successfully")
-		result, resultErr, usage := r.extractResultFromPod(ctx, log, agentRun)
+		result, resultErr, usage, skipped := r.extractResultFromPod(ctx, log, agentRun)
+		if skipped {
+			return r.skipRun(ctx, agentRun, result)
+		}
 		if resultErr != "" {
 			hasPostRunHooks := agentRun.Spec.Lifecycle != nil && len(agentRun.Spec.Lifecycle.PostRun) > 0
 			if hasPostRunHooks {
@@ -341,7 +344,7 @@ func (r *AgentRunReconciler) reconcileRunningAgentSandbox(
 		// Try to extract the structured result from pod logs first — the
 		// agent-runner writes a detailed error there. Fall back to the
 		// Sandbox condition message if pod logs aren't available.
-		_, resultErr, _ := r.extractResultFromPod(ctx, log, agentRun)
+		_, resultErr, _, _ := r.extractResultFromPod(ctx, log, agentRun)
 		if resultErr == "" {
 			resultErr = sandboxConditionMessage(sandbox.Object)
 		}

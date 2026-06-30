@@ -840,7 +840,8 @@ func (sr *SpawnRouter) updateParentDelegateStatus(ctx context.Context, parentRun
 		allDone := true
 		for _, d := range parent.Status.Delegates {
 			if d.Phase != sympoziumv1alpha1.AgentRunPhaseSucceeded &&
-				d.Phase != sympoziumv1alpha1.AgentRunPhaseFailed {
+				d.Phase != sympoziumv1alpha1.AgentRunPhaseFailed &&
+				d.Phase != sympoziumv1alpha1.AgentRunPhaseSkipped {
 				allDone = false
 				break
 			}
