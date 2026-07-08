@@ -671,8 +671,8 @@ function BuilderCanvas({
 
   // Handlers for ReactFlow drag/transform events.
   const onNodesChange = useCallback(
-    (changes: NodeChange[]) => setNodesRef.current(
-      (prev) => applyNodeChanges(changes, prev)),
+    (changes: NodeChange<Node<AgentConfigNodeData | StimulusNodeData>>[]) =>
+      setNodesRef.current((prev) => applyNodeChanges(changes, prev)),
     [],
   );
   const onEdgesChange = useCallback(

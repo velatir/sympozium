@@ -1062,7 +1062,7 @@ function useDemoSimulation(
             if (!ensembles.length) return prev;
             const target = pickRandom(ensembles);
             const delta = Math.random() > 0.4 ? 1 : -1;
-            const newCount = Math.max(0, Math.min(12, (target.data.runningCount || 0) + delta));
+            const newCount = Math.max(0, Math.min(12, (Number(target.data.runningCount) || 0) + delta));
             return prev.map((n) =>
               n.id === target.id ? { ...n, data: { ...n.data, runningCount: newCount } } : n,
             );
