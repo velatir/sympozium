@@ -1320,8 +1320,7 @@ func runInstall(imageTag string, setValues []string) error {
 	if nsPhase, err := exec.Command("kubectl", "get", "namespace", helmNamespace,
 		"-o", "jsonpath={.status.phase}").Output(); err == nil && string(nsPhase) == "Terminating" {
 		fmt.Println("  Namespace is stuck terminating, cleaning up finalizers...")
-		resources := []string{"agentruns", "agents", "sympoziumpolicies", "skillpacks", "sympoziumschedules", "ensembles", "sympoziumconfigs"}
-		for _, res := range resources {
+		for _, res := range sympoziumResources {
 			stripFinalizers(res)
 		}
 		// Wait for the namespace to be fully removed.
@@ -1435,12 +1434,11 @@ func runUninstall() error {
 	// Strip finalizers from all Sympozium CRD instances BEFORE deleting the
 	// controller, so resources don't get stuck in Terminating state.
 	fmt.Println("  Removing finalizers from Sympozium resources...")
-	resources := []string{"agentruns", "agents", "sympoziumpolicies", "skillpacks", "sympoziumschedules", "ensembles", "sympoziumconfigs"}
-	for _, res := range resources {
+	for _, res := range sympoziumResources {
 		stripFinalizers(res)
 	}
 	fmt.Println("  Deleting Sympozium custom resources...")
-	for _, res := range resources {
+	for _, res := range sympoziumResources {
 		_ = kubectl("delete", res+".sympozium.ai", "--all", "--all-namespaces", "--ignore-not-found", "--timeout=60s")
 	}
 
@@ -1474,8 +1472,28 @@ func runUninstall() error {
 	fmt.Println("  Deleting Sympozium CRDs...")
 	ch, err := helmchart.Load()
 	if err == nil {
+		// ch.CRDObjects() includes subchart CRDs (llmfit-dra's ModelClaim).
+		// Those are shared cluster infrastructure: keep them when a
+		// standalone llmfit-dra release still owns them.
+		keepDepCRDs := hasStandaloneLLMFitRelease()
+		depCRDs := map[string]bool{}
+		for _, dep := range ch.Dependencies() {
+			for _, crd := range dep.CRDObjects() {
+				depCRDs[crd.Filename] = true
+			}
+		}
 		for _, crd := range ch.CRDObjects() {
+			if keepDepCRDs && depCRDs[crd.Filename] {
+				fmt.Printf("  Keeping %s: a standalone llmfit-dra release still uses it\n", crd.Name)
+				continue
+			}
 			_ = kubectlApplyDeleteStdin(string(crd.File.Data))
+		}
+		if !keepDepCRDs {
+			// The DRA driver publishes ResourceSlices outside the Helm
+			// release; remove any stragglers the kubelet didn't deregister.
+			_ = kubectlQuiet("delete", "resourceslices.resource.k8s.io",
+				"--field-selector", "spec.driver=llmfit.ai", "--ignore-not-found")
 		}
 	} else {
 		// Fallback: delete by label.
@@ -1492,6 +1510,38 @@ func runUninstall() error {
 
 	fmt.Println("  Sympozium uninstalled.")
 	return nil
+}
+
+// sympoziumResources lists the plural names of every sympozium.ai CRD — keep
+// in sync with config/crd/bases/. Used to strip finalizers and delete CR
+// instances before the controller goes away (install pre-flight + uninstall).
+var sympoziumResources = []string{
+	"agentruns", "agents", "ensembles", "mcpservers", "models",
+	"skillpacks", "sympoziumconfigs", "sympoziumpolicies", "sympoziumschedules",
+}
+
+// hasStandaloneLLMFitRelease reports whether an llmfit-dra Helm release exists
+// on its own (installed directly from the llmfit-dra repo) rather than as the
+// subchart bundled into the sympozium release. Best-effort: any error counts
+// as "not found".
+func hasStandaloneLLMFitRelease() bool {
+	cfg, err := newHelmConfig("")
+	if err != nil {
+		return false
+	}
+	list := action.NewList(cfg)
+	list.AllNamespaces = true
+	list.All = true
+	releases, err := list.Run()
+	if err != nil {
+		return false
+	}
+	for _, r := range releases {
+		if r.Chart != nil && r.Chart.Metadata != nil && r.Chart.Metadata.Name == "llmfit-dra" {
+			return true
+		}
+	}
+	return false
 }
 
 // manualUninstall deletes Sympozium resources directly via kubectl, used as a
@@ -1515,9 +1565,11 @@ func manualUninstall() {
 		"--ignore-not-found")
 }
 
-// kubectlApplyDeleteStdin pipes YAML to kubectl delete.
+// kubectlApplyDeleteStdin pipes YAML to kubectl delete. The wait is bounded:
+// a CRD whose instances hold finalizers with no controller left to clear them
+// would otherwise block deletion forever.
 func kubectlApplyDeleteStdin(yaml string) error {
-	cmd := exec.Command("kubectl", "delete", "--ignore-not-found", "-f", "-")
+	cmd := exec.Command("kubectl", "delete", "--ignore-not-found", "--timeout=60s", "-f", "-")
 	cmd.Stdin = strings.NewReader(yaml)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
