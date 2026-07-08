@@ -582,6 +582,8 @@ func (r *EnsembleReconciler) reconcileAgentConfig(
 // resolveAuthRefs filters the ensemble's auth refs to those matching the
 // persona's provider. When a local model endpoint is active, no auth is needed.
 func resolveAuthRefs(pack *sympoziumv1alpha1.Ensemble, persona *sympoziumv1alpha1.AgentConfigSpec, modelEndpoint string) []sympoziumv1alpha1.SecretRef {
+	// Local model endpoints use cluster-internal inference — no external auth needed,
+	// even when the persona specifies a cloud provider.
 	if modelEndpoint != "" {
 		return nil
 	}
@@ -602,12 +604,14 @@ func resolveAuthRefs(pack *sympoziumv1alpha1.Ensemble, persona *sympoziumv1alpha
 
 // resolveModel computes the desired model name from persona, ensemble defaults,
 // and local model endpoint override.
+// Precondition: when modelEndpoint is non-empty, pack.Spec.ModelRef must also be
+// non-empty (the Reconcile method enforces this before calling resolveModel).
 func resolveModel(pack *sympoziumv1alpha1.Ensemble, persona *sympoziumv1alpha1.AgentConfigSpec, modelEndpoint string) string {
 	model := persona.Model
 	if model == "" {
 		model = "gpt-4o"
 	}
-	if modelEndpoint != "" {
+	if modelEndpoint != "" && pack.Spec.ModelRef != "" {
 		model = pack.Spec.ModelRef
 	}
 	return model

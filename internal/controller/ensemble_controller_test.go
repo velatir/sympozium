@@ -280,6 +280,14 @@ func TestResolveAuthRefs_FiltersOnProvider(t *testing.T) {
 			t.Fatalf("got %+v, want nil", got)
 		}
 	})
+
+	t.Run("falls back to all refs when provider has no match", func(t *testing.T) {
+		persona := &sympoziumv1alpha1.AgentConfigSpec{Provider: "azure-openai"}
+		got := resolveAuthRefs(pack, persona, "")
+		if len(got) != 2 {
+			t.Fatalf("got %d refs, want 2 (fallback to all)", len(got))
+		}
+	})
 }
 
 func TestResolveModel_Precedence(t *testing.T) {
@@ -307,6 +315,14 @@ func TestResolveModel_Precedence(t *testing.T) {
 		persona := &sympoziumv1alpha1.AgentConfigSpec{Model: "gpt-5-mini"}
 		if got := resolveModel(pack, persona, "http://local:8080"); got != "local-llm" {
 			t.Fatalf("got %q, want local-llm", got)
+		}
+	})
+
+	t.Run("preserves default when modelRef is empty with local endpoint", func(t *testing.T) {
+		emptyRefPack := &sympoziumv1alpha1.Ensemble{Spec: sympoziumv1alpha1.EnsembleSpec{}}
+		persona := &sympoziumv1alpha1.AgentConfigSpec{}
+		if got := resolveModel(emptyRefPack, persona, "http://local:8080"); got != "gpt-4o" {
+			t.Fatalf("got %q, want gpt-4o (should not overwrite with empty modelRef)", got)
 		}
 	})
 }
