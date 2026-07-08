@@ -37,11 +37,12 @@ func (r *ModelReconciler) usesDRAPlacement(model *sympoziumv1alpha1.Model) bool 
 	}
 }
 
-// reconcilePlacingDRA ensures the same-named ModelClaim and transitions to
-// Pending once it resolves. Satisfiable is advisory (llmfit-dra semantics):
-// an unsatisfiable-right-now claim still gets its template, pods queue, and
-// the exact shortfall is surfaced in PlacementMessage instead of blocking.
-func (r *ModelReconciler) reconcilePlacingDRA(ctx context.Context, model *sympoziumv1alpha1.Model, log logr.Logger) (ctrl.Result, error) {
+// ensureModelClaim creates or updates the same-named, Model-owned ModelClaim.
+// Called from the Placing phase AND from ensureDeployment — the latter covers
+// the upgrade path where a Model was initialized by a pre-DRA controller and
+// skipped Placing entirely: its pod would otherwise reference a
+// ResourceClaimTemplate that nothing ever creates.
+func (r *ModelReconciler) ensureModelClaim(ctx context.Context, model *sympoziumv1alpha1.Model) (*llmfitv1alpha1.ModelClaim, error) {
 	mc := &llmfitv1alpha1.ModelClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: model.Name, Namespace: model.Namespace},
 	}
@@ -58,7 +59,19 @@ func (r *ModelReconciler) reconcilePlacingDRA(ctx context.Context, model *sympoz
 		return nil
 	})
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensuring ModelClaim: %w", err)
+		return nil, fmt.Errorf("ensuring ModelClaim: %w", err)
+	}
+	return mc, nil
+}
+
+// reconcilePlacingDRA ensures the same-named ModelClaim and transitions to
+// Pending once it resolves. Satisfiable is advisory (llmfit-dra semantics):
+// an unsatisfiable-right-now claim still gets its template, pods queue, and
+// the exact shortfall is surfaced in PlacementMessage instead of blocking.
+func (r *ModelReconciler) reconcilePlacingDRA(ctx context.Context, model *sympoziumv1alpha1.Model, log logr.Logger) (ctrl.Result, error) {
+	mc, err := r.ensureModelClaim(ctx, model)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	resolved := apimeta.FindStatusCondition(mc.Status.Conditions, llmfitv1alpha1.ConditionResolved)

@@ -606,7 +606,18 @@ func (r *ModelReconciler) reconcileDownloading(ctx context.Context, model *sympo
 		return ctrl.Result{}, nil
 	}
 
-	// Still downloading
+	// Still downloading — and if the download pod cannot even schedule, say
+	// WHY: the UI surfaces status.message as the node's waiting reason.
+	msg := "Downloading model weights"
+	if reason := r.pendingPodReason(ctx, model.Namespace, map[string]string{"job-name": jobName}); reason != "" {
+		msg = "download pod pending: " + reason
+	}
+	if model.Status.Message != msg {
+		model.Status.Message = msg
+		if err := r.Status().Update(ctx, model); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
@@ -647,8 +658,44 @@ func (r *ModelReconciler) reconcileLoading(ctx context.Context, model *sympozium
 		return ctrl.Result{}, nil
 	}
 
-	// Still loading
+	// Still loading — a serving pod stuck Pending (device claim queued,
+	// template missing, unschedulable) should explain itself in the UI.
+	msg := "Loading model into inference server"
+	if reason := r.pendingPodReason(ctx, model.Namespace, map[string]string{
+		"app.kubernetes.io/name":     "model",
+		"app.kubernetes.io/instance": model.Name,
+	}); reason != "" {
+		msg = "serving pod pending: " + reason
+	}
+	if model.Status.Message != msg {
+		model.Status.Message = msg
+		if err := r.Status().Update(ctx, model); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// pendingPodReason returns the scheduler's explanation for a Pending pod
+// matching the label selector ("" when nothing is pending, or no reason yet).
+func (r *ModelReconciler) pendingPodReason(ctx context.Context, ns string, sel map[string]string) string {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(ns), client.MatchingLabels(sel)); err != nil {
+		return ""
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Status.Phase != corev1.PodPending {
+			continue
+		}
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Message != "" {
+				return c.Message
+			}
+		}
+		return "pod pending (no scheduler verdict yet)"
+	}
+	return ""
 }
 
 // reconcileReady verifies the inference server is still healthy.
@@ -917,6 +964,15 @@ echo "Download complete"`
 
 func (r *ModelReconciler) ensureDeployment(ctx context.Context, model *sympoziumv1alpha1.Model, log logr.Logger) error {
 	backend := r.backendFor(model)
+
+	// Upgrade-path guard: a DRA-placed pod references a same-named
+	// ResourceClaimTemplate, so the claim must exist BEFORE the pod —
+	// including for Models that skipped Placing under a pre-DRA controller.
+	if r.usesDRAPlacement(model) {
+		if _, err := r.ensureModelClaim(ctx, model); err != nil {
+			return err
+		}
+	}
 
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
