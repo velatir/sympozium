@@ -362,8 +362,16 @@ export function EnsembleCanvas({ pack }: EnsembleCanvasProps) {
 
 	// Handlers for ReactFlow drag/transform events (plain useState, not useNodesState).
 	const onNodesChange = useCallback(
-		(changes: NodeChange[]) =>
-			setNodesRef.current((prev) => applyNodeChanges(changes, prev)),
+		(
+			changes: NodeChange<
+				Node<
+					| AgentConfigNodeData
+					| ModelNodeData
+					| ProviderNodeData
+					| StimulusNodeData
+				>
+			>[],
+		) => setNodesRef.current((prev) => applyNodeChanges(changes, prev)),
 		[],
 	);
 

@@ -50,6 +50,7 @@ import {
   Activity,
   Radio,
   User,
+  Bot,
   Lock,
   Unlock,
   RotateCcw,
@@ -62,6 +63,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type {
+  Agent,
   Ensemble,
   Model,
   AgentRun,
@@ -268,6 +270,42 @@ function PersonaNode({ data }: NodeProps<Node<PersonaNodeData>>) {
   );
 }
 
+interface StandaloneAgentNodeData {
+  name: string;
+  model: string;
+  runPhase?: string;
+  [key: string]: unknown;
+}
+
+function StandaloneAgentNode({ data }: NodeProps<Node<StandaloneAgentNodeData>>) {
+  const dotClass = data.runPhase === "Running" || data.runPhase === "Serving"
+    ? "bg-blue-500 animate-pulse"
+    : data.runPhase === "Succeeded"
+      ? "bg-green-500"
+      : data.runPhase === "Failed"
+        ? "bg-red-500"
+        : "bg-muted-foreground/40";
+
+  return (
+    <div className="border border-primary/30 bg-card px-3 py-2 shadow-sm min-w-[150px]">
+      <Handle type="target" position={Position.Top} className="!bg-primary !w-1.5 !h-1.5" />
+      <Handle type="source" position={Position.Bottom} className="!bg-primary !w-1.5 !h-1.5" />
+      <div className="flex items-center gap-1.5">
+        <Bot className="h-3.5 w-3.5 text-primary shrink-0" />
+        <span className="text-[11px] font-medium truncate">{data.name}</span>
+        {data.runPhase && (
+          <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${dotClass}`} />
+        )}
+      </div>
+      {data.model && (
+        <p className="text-[9px] text-muted-foreground/70 truncate mt-0.5" title={data.model}>
+          {data.model}
+        </p>
+      )}
+    </div>
+  );
+}
+
 interface AgentRunNodeData {
   runName: string;
   task: string;
@@ -451,6 +489,7 @@ export const nodeTypes = {
   ensemble: EnsembleNode,
   stimulus: TopologyStimulusNode,
   persona: PersonaNode,
+  agent: StandaloneAgentNode,
   agentRun: AgentRunNode,
   cloudProvider: CloudProviderNode,
   gateway: GatewayNode,
@@ -467,6 +506,7 @@ export const NODE_SIZES: Record<string, [number, number]> = {
   ensemble:      [200, 50],
   stimulus:      [140, 40],
   persona:       [150, 50],
+  agent:         [170, 56],
   agentRun:      [140, 40],
 };
 
@@ -512,12 +552,14 @@ function entityFingerprint(
   providerNodes: ProviderNode[],
   models: Model[],
   ensembles: Ensemble[],
+  agents: Agent[],
   hasGateway: boolean,
 ): string {
   const parts = [
     providerNodes.map((n) => n.nodeName).sort().join(","),
     models.map((m) => m.metadata.name).sort().join(","),
     ensembles.map((e) => e.metadata.name).sort().join(","),
+    agents.map((a) => a.metadata.name).sort().join(","),
     hasGateway ? "gw" : "",
   ];
   return parts.join("|");
@@ -531,6 +573,7 @@ function buildTopology(
   providerNodes: ProviderNode[],
   models: Model[],
   ensembles: Ensemble[],
+  agents: Agent[],
   gateway: GatewayConfigResponse | undefined,
   runningByEnsemble: Record<string, number>,
   webEndpointAgents: string[],
@@ -541,6 +584,18 @@ function buildTopology(
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   const P = { x: 0, y: 0 }; // placeholder — dagre computes real positions
+
+  // Agents stamped out by an ensemble are rendered as personas under their
+  // ensemble; everything else is a standalone agent with its own node.
+  const ensembleAgentRefs = new Set<string>();
+  for (const ens of ensembles) {
+    for (const cfg of ens.spec.agentConfigs || []) {
+      ensembleAgentRefs.add(`${ens.metadata.name}-${cfg.name}`);
+    }
+  }
+  const standaloneAgents = agents.filter(
+    (a) => !ensembleAgentRefs.has(a.metadata.name),
+  );
 
   // ── Provider detection ─────────────────────────────────────────────────
   const PROVIDER_LABELS: Record<string, string> = {
@@ -583,6 +638,29 @@ function buildTopology(
           ensProviderMap.set(ens.metadata.name, inferred);
         }
       }
+    }
+  }
+
+  // Standalone agents reference their model the same two ways ensembles do:
+  // a baseURL pointing at a Model CR's endpoint, or an external provider.
+  const agentModelMap = new Map<string, string>(); // agent name → model name
+  const agentProviderMap = new Map<string, string>(); // agent name → provider
+  for (const agent of standaloneAgents) {
+    const baseURL = agent.spec.agents?.default?.baseURL;
+    const matchedModel = baseURL
+      ? models.find(
+          (m) => m.status?.endpoint && baseURL.includes(m.status.endpoint.replace("/v1", "")),
+        )
+      : undefined;
+    if (matchedModel) {
+      agentModelMap.set(agent.metadata.name, matchedModel.metadata.name);
+      continue;
+    }
+    let prov = (agent.spec.authRefs || []).find((r) => r.provider)?.provider;
+    if (!prov && baseURL) prov = inferProvider(baseURL) || undefined;
+    if (prov) {
+      ensProviders.set(prov, PROVIDER_LABELS[prov] || prov);
+      agentProviderMap.set(agent.metadata.name, prov);
     }
   }
 
@@ -697,6 +775,50 @@ function buildTopology(
         target: modelId,
         style: { stroke: "#8a8c8280", strokeWidth: 1 },
         markerEnd: { type: MarkerType.ArrowClosed, color: "#8a8c8280" },
+      });
+    }
+  }
+
+  // ── Standalone agents (not stamped by an ensemble) ────────────────────
+  for (const agent of standaloneAgents) {
+    const agentId = `agent-${agent.metadata.name}`;
+    nodes.push({
+      id: agentId,
+      type: "agent",
+      position: P,
+      data: {
+        name: agent.metadata.name,
+        model: agent.spec.agents?.default?.model || "",
+        runPhase: runPhases[agent.metadata.name],
+      },
+    });
+    const modelName = agentModelMap.get(agent.metadata.name);
+    if (modelName) {
+      edges.push({
+        id: `e-${agentId}-model-${modelName}`,
+        source: `model-${modelName}`,
+        target: agentId,
+        style: { stroke: "#6366f1", strokeWidth: 1.5, strokeDasharray: "4 3" },
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#6366f1" },
+        animated: true,
+        label: "inference",
+        labelStyle: { fontSize: 9, fill: "#8a8c82" },
+        labelBgStyle: { fill: "#09090b", fillOpacity: 0.8 },
+        labelBgPadding: [4, 2] as [number, number],
+      });
+    }
+    const prov = agentProviderMap.get(agent.metadata.name);
+    if (prov) {
+      edges.push({
+        id: `e-cp-${prov}-${agentId}`,
+        source: `cp-${prov}`,
+        target: agentId,
+        style: { stroke: "#f97316", strokeWidth: 1.5, strokeDasharray: "4 3" },
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#f97316" },
+        label: "inference",
+        labelStyle: { fontSize: 9, fill: "#8a8c82" },
+        labelBgStyle: { fill: "#09090b", fillOpacity: 0.8 },
+        labelBgPadding: [4, 2] as [number, number],
       });
     }
   }
@@ -918,12 +1040,6 @@ function buildTopology(
   }
 
   // ── Ad-hoc active runs (not belonging to any ensemble) ─────────────────
-  const ensembleAgentRefs = new Set<string>();
-  for (const ens of ensembles) {
-    for (const cfg of ens.spec.agentConfigs || []) {
-      ensembleAgentRefs.add(`${ens.metadata.name}-${cfg.name}`);
-    }
-  }
   for (const run of activeRuns) {
     if (run.spec?.agentRef && !ensembleAgentRefs.has(run.spec.agentRef)) {
       const runId = `run-${run.metadata.name}`;
@@ -940,7 +1056,8 @@ function buildTopology(
           label: run.metadata.name,
         },
       });
-      // Connect ad-hoc sub-agents to their parent run if it exists.
+      // Connect ad-hoc sub-agents to their parent run if it exists;
+      // top-level runs connect to their standalone agent's node.
       if (isSubAgent) {
         const parentRunId = `run-${run.spec.parent!.runName}`;
         const parentExists = activeRuns.some(
@@ -955,6 +1072,14 @@ function buildTopology(
             animated: true,
           });
         }
+      } else if (standaloneAgents.some((a) => a.metadata.name === run.spec.agentRef)) {
+        edges.push({
+          id: `e-run-${run.metadata.name}`,
+          source: `agent-${run.spec.agentRef}`,
+          target: runId,
+          style: { stroke: "#22d3ee40", strokeWidth: 1 },
+          animated: true,
+        });
       }
     }
   }
@@ -967,11 +1092,16 @@ function buildTopology(
           (p) => `${ens.metadata.name}-${p.name}` === agentName,
         ),
       );
-      if (ownerEns) {
+      const target = ownerEns
+        ? `ens-${ownerEns.metadata.name}`
+        : standaloneAgents.some((a) => a.metadata.name === agentName)
+          ? `agent-${agentName}`
+          : null;
+      if (target) {
         edges.push({
           id: `e-gw-${agentName}`,
           source: "gateway",
-          target: `ens-${ownerEns.metadata.name}`,
+          target,
           style: { stroke: "#f59e0b", strokeWidth: 1.5, strokeDasharray: "6 3" },
           markerEnd: { type: MarkerType.ArrowClosed, color: "#f59e0b" },
           label: "web endpoint",
@@ -1140,6 +1270,7 @@ function TopologyCanvas() {
       providerNodes || [],
       models || [],
       ensembles || [],
+      agents || [],
       !!gateway,
     ) + "|runs:" + activeRunFingerprint;
 
@@ -1151,6 +1282,7 @@ function TopologyCanvas() {
         providerNodes || [],
         models || [],
         ensembles || [],
+        agents || [],
         gateway,
         runningByEnsemble,
         webEndpointAgents,
@@ -1185,6 +1317,7 @@ function TopologyCanvas() {
           providerNodes || [],
           models || [],
           ensembles || [],
+          agents || [],
           gateway,
           runningByEnsemble,
           webEndpointAgents,
@@ -1206,6 +1339,7 @@ function TopologyCanvas() {
           providerNodes || [],
           models || [],
           ensembles || [],
+          agents || [],
           gateway,
           runningByEnsemble,
           webEndpointAgents,
@@ -1216,7 +1350,7 @@ function TopologyCanvas() {
         return freshEdges;
       });
     }
-  }, [providerNodes, models, ensembles, gateway, runningByEnsemble, webEndpointAgents, runPhases, activeRuns, activeRunFingerprint, densityData]);
+  }, [providerNodes, models, ensembles, agents, gateway, runningByEnsemble, webEndpointAgents, runPhases, activeRuns, activeRunFingerprint, densityData]);
 
   // Save positions to localStorage after any node drag ends.
   const handleNodesChange = useCallback(
