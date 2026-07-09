@@ -1153,10 +1153,7 @@ func (sr *SpawnRouter) expireDelegation(ctx context.Context, childRunName, targe
 	pd := val.(*pendingDelegation)
 
 	parent, err := sr.lookupParentRun(ctx, pd.ParentRunID, pd.ParentNamespace)
-	parentSettled := apierrors.IsNotFound(err) ||
-		(err == nil && (parent.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSucceeded ||
-			parent.Status.Phase == sympoziumv1alpha1.AgentRunPhaseFailed ||
-			parent.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSkipped))
+	parentSettled := apierrors.IsNotFound(err) || (err == nil && !isAgentRunActive(parent.Status.Phase))
 
 	if parentSettled {
 		parentPhase := "deleted"
