@@ -59,6 +59,14 @@ type pendingDelegation struct {
 	timer *time.Timer
 }
 
+// storePending publishes a child → parent mapping. All writers must funnel
+// through here: the retrieval sites (handleChildCompleted, handleChildFailed,
+// expireDelegation) assert *pendingDelegation, so a writer storing the struct
+// by value would panic the router goroutine on the child's first event.
+func (sr *SpawnRouter) storePending(childRunName string, pd *pendingDelegation) {
+	sr.pending.Store(childRunName, pd)
+}
+
 // pendingBatch tracks the state of an in-flight subagent batch spawn.
 type pendingBatch struct {
 	batchID       string
@@ -226,7 +234,7 @@ func (sr *SpawnRouter) handleSpawnRequest(ctx context.Context, event *eventbus.E
 		ParentRunID:     parentRunID,
 		ParentNamespace: parentRun.Namespace,
 	}
-	sr.pending.Store(result.RunName, pd)
+	sr.storePending(result.RunName, pd)
 
 	// Enforce the Ensemble's relationships[].timeout for this edge. Without a
 	// declared timeout the delegate wait is bounded only by the parent's run
@@ -506,7 +514,7 @@ func (sr *SpawnRouter) handleSubagentRequest(ctx context.Context, event *eventbu
 		)
 
 		// Track child -> parent for result delivery (reuse existing pending map).
-		sr.pending.Store(result.RunName, pendingDelegation{
+		sr.storePending(result.RunName, &pendingDelegation{
 			RequestID:       req.BatchID,
 			ParentRunID:     parentRunID,
 			ParentNamespace: parentRun.Namespace,
@@ -758,7 +766,7 @@ func (sr *SpawnRouter) spawnSequentialChild(ctx context.Context, batch *pendingB
 		"index", idx,
 	)
 
-	sr.pending.Store(result.RunName, pendingDelegation{
+	sr.storePending(result.RunName, &pendingDelegation{
 		RequestID:       batch.batchID,
 		ParentRunID:     batch.parentRunID,
 		ParentNamespace: batch.namespace,
@@ -943,8 +951,10 @@ func (sr *SpawnRouter) updateParentDelegateStatus(ctx context.Context, parentRun
 		}
 
 		// Transition parent back to Running so the controller resumes
-		// timeout checking and the agent pod can continue.
-		if allDone {
+		// timeout checking and the agent pod can continue. Only from
+		// AwaitingDelegate: a child settling after the parent already
+		// finished must not resurrect a terminal run.
+		if allDone && parent.Status.Phase == sympoziumv1alpha1.AgentRunPhaseAwaitingDelegate {
 			parent.Status.Phase = sympoziumv1alpha1.AgentRunPhaseRunning
 		}
 
@@ -1127,6 +1137,14 @@ func (sr *SpawnRouter) delegationEdgeTimeout(ctx context.Context, namespace, ins
 // LoadAndDelete is the arbiter: exactly one of this timer and the child's
 // completion/failure handler claims the pending entry, so the parent is
 // unblocked exactly once.
+//
+// When the edge timeout outlasts the parent's own run budget, the parent's
+// client-side wait (delegateWaitBudget) gives up first and its run may settle
+// before this timer fires. Reporting a delegation failure then would read as
+// a second, ghost failure of the same call — and marking the delegate
+// terminal would flip the settled parent's phase back to Running — so a
+// settled parent gets cleanup only: the orphaned child is deleted without a
+// result publish, status rewrite, or circuit-breaker increment.
 func (sr *SpawnRouter) expireDelegation(ctx context.Context, childRunName, targetPersona string, d time.Duration) {
 	val, ok := sr.pending.LoadAndDelete(childRunName)
 	if !ok {
@@ -1134,17 +1152,33 @@ func (sr *SpawnRouter) expireDelegation(ctx context.Context, childRunName, targe
 	}
 	pd := val.(*pendingDelegation)
 
-	errMsg := fmt.Sprintf("timed out after %s (Ensemble relationship timeout)", d)
-	sr.Log.Info("Delegation edge timed out",
-		"childRun", childRunName, "parentRun", pd.ParentRunID,
-		"targetPersona", targetPersona, "timeout", d)
+	parent, err := sr.lookupParentRun(ctx, pd.ParentRunID, pd.ParentNamespace)
+	parentSettled := apierrors.IsNotFound(err) ||
+		(err == nil && (parent.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSucceeded ||
+			parent.Status.Phase == sympoziumv1alpha1.AgentRunPhaseFailed ||
+			parent.Status.Phase == sympoziumv1alpha1.AgentRunPhaseSkipped))
 
-	// Unblock the parent's delegate_to_persona call first; everything after
-	// this is cleanup the parent does not wait on.
-	sr.publishDelegateResult(ctx, pd.ParentRunID, pd.RequestID, "", errMsg)
-	sr.updateParentDelegateStatus(ctx, pd.ParentRunID, pd.ParentNamespace, childRunName,
-		sympoziumv1alpha1.AgentRunPhaseFailed, "", errMsg)
-	sr.incrementCircuitBreaker(ctx, pd.ParentRunID, pd.ParentNamespace)
+	if parentSettled {
+		parentPhase := "deleted"
+		if err == nil {
+			parentPhase = string(parent.Status.Phase)
+		}
+		sr.Log.Info("Delegate child outlived its settled parent; deleting the orphaned child (not a delegation failure)",
+			"childRun", childRunName, "parentRun", pd.ParentRunID,
+			"parentPhase", parentPhase, "targetPersona", targetPersona, "timeout", d)
+	} else {
+		errMsg := fmt.Sprintf("timed out after %s (Ensemble relationship timeout)", d)
+		sr.Log.Info("Delegation edge timed out",
+			"childRun", childRunName, "parentRun", pd.ParentRunID,
+			"targetPersona", targetPersona, "timeout", d)
+
+		// Unblock the parent's delegate_to_persona call first; everything after
+		// this is cleanup the parent does not wait on.
+		sr.publishDelegateResult(ctx, pd.ParentRunID, pd.RequestID, "", errMsg)
+		sr.updateParentDelegateStatus(ctx, pd.ParentRunID, pd.ParentNamespace, childRunName,
+			sympoziumv1alpha1.AgentRunPhaseFailed, "", errMsg)
+		sr.incrementCircuitBreaker(ctx, pd.ParentRunID, pd.ParentNamespace)
+	}
 
 	// Stop the child burning tokens on a result nobody will read. Its later
 	// failure event is a no-op: the pending entry is already gone.

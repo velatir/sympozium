@@ -113,6 +113,12 @@ func TestDelegationEdgeTimeout_MissingEnsemble(t *testing.T) {
 // delegationFixture wires a parent run, a running child, and an ensemble with
 // one pending delegation between them.
 func delegationFixture(t *testing.T) (*SpawnRouter, *recordingEventBus) {
+	return delegationFixtureAtPhase(t, sympoziumv1alpha1.AgentRunPhaseAwaitingDelegate)
+}
+
+// delegationFixtureAtPhase is delegationFixture with the parent run pinned at
+// an arbitrary phase, for the paths where the parent settled before the child.
+func delegationFixtureAtPhase(t *testing.T, phase sympoziumv1alpha1.AgentRunPhase) (*SpawnRouter, *recordingEventBus) {
 	t.Helper()
 
 	parentRun := &sympoziumv1alpha1.AgentRun{
@@ -122,7 +128,7 @@ func delegationFixture(t *testing.T) (*SpawnRouter, *recordingEventBus) {
 			Labels:    map[string]string{"sympozium.ai/ensemble": "my-pack"},
 		},
 		Status: sympoziumv1alpha1.AgentRunStatus{
-			Phase: sympoziumv1alpha1.AgentRunPhaseAwaitingDelegate,
+			Phase: phase,
 			Delegates: []sympoziumv1alpha1.DelegateStatus{
 				{ChildRunName: "child-run", TargetPersona: "researcher", Phase: sympoziumv1alpha1.AgentRunPhasePending},
 			},
@@ -237,6 +243,98 @@ func TestExpireDelegation_NoopAfterChildSettled(t *testing.T) {
 	var child sympoziumv1alpha1.AgentRun
 	if err := sr.Client.Get(ctx, types.NamespacedName{Name: "child-run", Namespace: "default"}, &child); err != nil {
 		t.Error("a settled child must not be deleted by a late timer")
+	}
+}
+
+// A timer firing after the parent run settled must not report a delegation
+// failure: no result publish, no delegate-status rewrite, no circuit-breaker
+// increment, and above all no phase resurrection. Only the orphaned child is
+// reaped.
+func TestExpireDelegation_ParentAlreadySettled(t *testing.T) {
+	sr, bus := delegationFixtureAtPhase(t, sympoziumv1alpha1.AgentRunPhaseSucceeded)
+	ctx := context.Background()
+
+	sr.expireDelegation(ctx, "child-run", "researcher", 15*time.Minute)
+
+	if _, ok := decodeDelegateResult(t, bus); ok {
+		t.Error("a settled parent must not receive a ghost delegate failure")
+	}
+
+	var pack sympoziumv1alpha1.Ensemble
+	if err := sr.Client.Get(ctx, types.NamespacedName{Name: "my-pack", Namespace: "default"}, &pack); err != nil {
+		t.Fatalf("get ensemble: %v", err)
+	}
+	if pack.Status.ConsecutiveDelegateFailures != 0 {
+		t.Errorf("ConsecutiveDelegateFailures = %d, want 0 — a settled parent must not count against the breaker", pack.Status.ConsecutiveDelegateFailures)
+	}
+
+	var parent sympoziumv1alpha1.AgentRun
+	if err := sr.Client.Get(ctx, types.NamespacedName{Name: "parent-run", Namespace: "default"}, &parent); err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if parent.Status.Phase != sympoziumv1alpha1.AgentRunPhaseSucceeded {
+		t.Errorf("parent phase = %q, want Succeeded — a late timer must not resurrect a terminal run", parent.Status.Phase)
+	}
+	if parent.Status.Delegates[0].Phase != sympoziumv1alpha1.AgentRunPhasePending {
+		t.Errorf("delegate phase = %q, want untouched Pending", parent.Status.Delegates[0].Phase)
+	}
+
+	// The orphaned child is still reaped.
+	var child sympoziumv1alpha1.AgentRun
+	if err := sr.Client.Get(ctx, types.NamespacedName{Name: "child-run", Namespace: "default"}, &child); err == nil {
+		t.Error("orphaned child should be deleted even when the parent settled")
+	}
+}
+
+func TestExpireDelegation_ParentDeleted(t *testing.T) {
+	sr, bus := delegationFixture(t)
+	ctx := context.Background()
+
+	// The parent run was cleaned up (cleanup: delete) before the timer fired.
+	if err := sr.Client.Delete(ctx, &sympoziumv1alpha1.AgentRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-run", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("delete parent: %v", err)
+	}
+
+	sr.expireDelegation(ctx, "child-run", "researcher", 15*time.Minute)
+
+	if _, ok := decodeDelegateResult(t, bus); ok {
+		t.Error("a deleted parent must not receive a ghost delegate failure")
+	}
+	var pack sympoziumv1alpha1.Ensemble
+	if err := sr.Client.Get(ctx, types.NamespacedName{Name: "my-pack", Namespace: "default"}, &pack); err != nil {
+		t.Fatalf("get ensemble: %v", err)
+	}
+	if pack.Status.ConsecutiveDelegateFailures != 0 {
+		t.Errorf("ConsecutiveDelegateFailures = %d, want 0", pack.Status.ConsecutiveDelegateFailures)
+	}
+	var child sympoziumv1alpha1.AgentRun
+	if err := sr.Client.Get(ctx, types.NamespacedName{Name: "child-run", Namespace: "default"}, &child); err == nil {
+		t.Error("orphaned child should be deleted when the parent is gone")
+	}
+}
+
+// A child settling normally after the parent already finished records its
+// outcome but must not flip the terminal parent back to Running.
+func TestHandleChildCompleted_DoesNotResurrectSettledParent(t *testing.T) {
+	sr, _ := delegationFixtureAtPhase(t, sympoziumv1alpha1.AgentRunPhaseSucceeded)
+	ctx := context.Background()
+
+	sr.handleChildCompleted(ctx, &eventbus.Event{
+		Metadata: map[string]string{"agentRunID": "child-run"},
+		Data:     json.RawMessage(`{"status":"success","response":"done"}`),
+	})
+
+	var parent sympoziumv1alpha1.AgentRun
+	if err := sr.Client.Get(ctx, types.NamespacedName{Name: "parent-run", Namespace: "default"}, &parent); err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if parent.Status.Phase != sympoziumv1alpha1.AgentRunPhaseSucceeded {
+		t.Errorf("parent phase = %q, want Succeeded", parent.Status.Phase)
+	}
+	if parent.Status.Delegates[0].Phase != sympoziumv1alpha1.AgentRunPhaseSucceeded {
+		t.Errorf("delegate phase = %q, want Succeeded — the outcome is still recorded", parent.Status.Delegates[0].Phase)
 	}
 }
 
