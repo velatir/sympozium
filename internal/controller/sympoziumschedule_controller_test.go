@@ -548,3 +548,91 @@ func TestSympoziumScheduleReconcile_PersistsRunTimeout(t *testing.T) {
 		t.Fatalf("Spec.Timeout = %s, want %s", got, want)
 	}
 }
+
+// The Forbid concurrency gate must treat every non-terminal phase as active.
+// AwaitingDelegate and PostRunning were both missing from the phase set, so an
+// orchestrator parked on delegate_to_persona read as finished and the next cron
+// tick stacked a second run on top of the live one.
+func TestSympoziumScheduleReconcile_ForbidBlocksOnNonTerminalPhases(t *testing.T) {
+	cases := []struct {
+		phase     sympoziumv1alpha1.AgentRunPhase
+		wantFires bool
+	}{
+		{sympoziumv1alpha1.AgentRunPhaseAwaitingDelegate, false},
+		{sympoziumv1alpha1.AgentRunPhasePostRunning, false},
+		{sympoziumv1alpha1.AgentRunPhasePending, false},
+		{sympoziumv1alpha1.AgentRunPhaseRunning, false},
+		{sympoziumv1alpha1.AgentRunPhaseServing, false},
+		{"", false},
+		{sympoziumv1alpha1.AgentRunPhaseSucceeded, true},
+		{sympoziumv1alpha1.AgentRunPhaseFailed, true},
+		{sympoziumv1alpha1.AgentRunPhaseSkipped, true},
+	}
+
+	for _, tc := range cases {
+		name := string(tc.phase)
+		if name == "" {
+			name = "Unobserved"
+		}
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			instance := &sympoziumv1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "inst-forbid", Namespace: "default"},
+				Spec: sympoziumv1alpha1.AgentSpec{
+					Agents: sympoziumv1alpha1.AgentsSpec{
+						Default: sympoziumv1alpha1.AgentConfig{Model: "claude-3-5-sonnet"},
+					},
+				},
+			}
+			schedule := &sympoziumv1alpha1.SympoziumSchedule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "inst-forbid-sweep",
+					Namespace:         "default",
+					CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute)),
+				},
+				Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
+					AgentRef: "inst-forbid",
+					Schedule: "* * * * *",
+					Task:     "sweep",
+					Type:     "sweep",
+					// The CRD defaults this to Forbid, but the fake client
+					// applies no defaulting, so set it explicitly.
+					ConcurrencyPolicy: "Forbid",
+				},
+			}
+			// The schedule's previous run. Carries only the schedule label, so
+			// the Forbid gate is the only gate that can see it — the
+			// serving-run gate further down matches on sympozium.ai/instance.
+			prevRun := &sympoziumv1alpha1.AgentRun{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "inst-forbid-sweep-1",
+					Namespace: "default",
+					Labels:    map[string]string{"sympozium.ai/schedule": "inst-forbid-sweep"},
+				},
+				Status: sympoziumv1alpha1.AgentRunStatus{Phase: tc.phase},
+			}
+
+			r, cl := newScheduleTestReconciler(t, instance, schedule, prevRun)
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: schedule.Name, Namespace: schedule.Namespace},
+			}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+
+			nextName := "inst-forbid-sweep-2"
+			err := cl.Get(context.Background(), types.NamespacedName{
+				Name:      nextName,
+				Namespace: "default",
+			}, &sympoziumv1alpha1.AgentRun{})
+
+			switch {
+			case tc.wantFires && err != nil:
+				t.Fatalf("phase %q is terminal: schedule should have fired and created %s, got: %v",
+					tc.phase, nextName, err)
+			case !tc.wantFires && err == nil:
+				t.Fatalf("phase %q is still active: Forbid should have blocked the tick, but %s was created",
+					tc.phase, nextName)
+			}
+		})
+	}
+}

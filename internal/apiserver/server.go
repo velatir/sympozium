@@ -179,6 +179,9 @@ func (s *Server) buildMux(frontendFS fs.FS, token string) http.Handler {
 	// Node endpoints
 	mux.HandleFunc("GET /api/v1/nodes", s.listClusterNodes)
 
+	// DRA inventory (llmfit-dra ResourceSlices — accelerators + fabric NICs)
+	mux.HandleFunc("GET /api/v1/dra/nodes", s.listDRANodes)
+
 	// Fitness endpoints (llmfit DaemonSet telemetry)
 	mux.HandleFunc("GET /api/v1/density/nodes", s.listDensityNodes)
 	mux.HandleFunc("GET /api/v1/density/nodes/{name}", s.getDensityNode)

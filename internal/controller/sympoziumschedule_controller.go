@@ -170,10 +170,7 @@ func (r *SympoziumScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		); err == nil {
 			for i := range scheduleRuns.Items {
 				phase := scheduleRuns.Items[i].Status.Phase
-				if phase == sympoziumv1alpha1.AgentRunPhaseRunning ||
-					phase == sympoziumv1alpha1.AgentRunPhasePending ||
-					phase == sympoziumv1alpha1.AgentRunPhaseServing ||
-					phase == "" {
+				if isAgentRunActive(phase) {
 					log.Info("Skipping trigger — active run exists (Forbid policy)",
 						"activeRun", scheduleRuns.Items[i].Name, "phase", phase)
 					_ = r.Status().Update(ctx, schedule)
@@ -407,8 +404,31 @@ func (r *SympoziumScheduleReconciler) nextScheduledRunNumber(ctx context.Context
 	return base, nil
 }
 
+// isAgentRunActive reports whether a phase means the run has not finished.
+// Beyond the obvious Pending/Running/Serving it covers:
+//
+//   - PostRunning: the agent is done but its postRun lifecycle hooks are not.
+//   - AwaitingDelegate: the run is parked while a delegate_to_persona child
+//     works. An orchestrator can sit here for tens of minutes.
+//   - "": the AgentRun controller has not observed the run yet.
+//
+// Omitting a phase here makes a Forbid schedule stack a second run on top of
+// a live one, so keep this in sync with the AgentRunPhase constants.
+func isAgentRunActive(phase sympoziumv1alpha1.AgentRunPhase) bool {
+	switch phase {
+	case sympoziumv1alpha1.AgentRunPhasePending,
+		sympoziumv1alpha1.AgentRunPhaseRunning,
+		sympoziumv1alpha1.AgentRunPhaseServing,
+		sympoziumv1alpha1.AgentRunPhasePostRunning,
+		sympoziumv1alpha1.AgentRunPhaseAwaitingDelegate,
+		"":
+		return true
+	}
+	return false
+}
+
 // pipelineInFlight reports whether any AgentRun belonging to the given ensemble
-// is still active (pending, running, or serving). It is used to stop a pipeline
+// is still active (see isAgentRunActive). It is used to stop a pipeline
 // head's schedule from kicking off a second pass while a previous pass is still
 // working its way through the sequential successors. Returns the name of the
 // first active run found for diagnostics.
@@ -421,11 +441,7 @@ func (r *SympoziumScheduleReconciler) pipelineInFlight(ctx context.Context, name
 		return "", false, err
 	}
 	for i := range runs.Items {
-		switch runs.Items[i].Status.Phase {
-		case sympoziumv1alpha1.AgentRunPhaseRunning,
-			sympoziumv1alpha1.AgentRunPhasePending,
-			sympoziumv1alpha1.AgentRunPhaseServing,
-			"":
+		if isAgentRunActive(runs.Items[i].Status.Phase) {
 			return runs.Items[i].Name, true, nil
 		}
 	}

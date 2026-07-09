@@ -882,6 +882,31 @@ export interface DensityNodeDetail {
   InstalledModels: DensityInstalledModel[];
 }
 
+export interface DraDevice {
+  name: string;
+  kind: string; // gpu | npu | cpu | nic
+  model?: string;
+  vendor?: string;
+  memoryGi?: number;
+  memoryBandwidthGBs?: number;
+  computeTFLOPS?: number;
+  healthy: boolean;
+  healthReason?: string;
+  linkLayer?: string; // nic: infiniband | ethernet (RoCE)
+  rateGbps?: number;  // nic: link rate
+}
+
+export interface DraNodeSummary {
+  nodeName: string;
+  devices: DraDevice[];
+}
+
+export interface DraNodesResponse {
+  available: boolean;
+  nodes: DraNodeSummary[];
+  total: number;
+}
+
 export interface DensityNodesResponse {
   nodes: DensityNodeSummary[];
   total: number;
@@ -1452,6 +1477,13 @@ export const api = {
       apiFetch<ProviderModelsResponse>("/api/v1/providers/bedrock/models", {
         method: "POST",
         body: JSON.stringify(data),
+      }),
+  },
+
+  dra: {
+    nodes: () =>
+      apiFetch<DraNodesResponse>("/api/v1/dra/nodes", {
+        skipNamespace: true,
       }),
   },
 

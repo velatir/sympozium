@@ -1,5 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
-  <g transform="translate(4 4) scale(0.2)">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <rect width="48" height="48" fill="#16130f"/>
+  <g transform="translate(6 6) scale(0.3)">
   <rect x="6" y="6.0" width="108" height="21.6" fill="#ede6da" stroke="#ede6da" stroke-width="0.8"/>
   <rect x="6" y="27.6" width="108" height="5.399999999999999" fill="#ede6da" stroke="#ede6da" stroke-width="0.8"/>
   <rect x="81" y="27.6" width="33" height="5.399999999999999" fill="#ede6da" stroke="#ede6da" stroke-width="0.8"/>
