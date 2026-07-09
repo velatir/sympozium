@@ -720,6 +720,16 @@ export function useGatewayMetrics(range_?: string) {
   });
 }
 
+// ── DRA inventory (llmfit-dra ResourceSlices) ────────────────────────────────────
+
+export function useDraNodes() {
+  return useQuery({
+    queryKey: ["dra", "nodes"],
+    queryFn: api.dra.nodes,
+    refetchInterval: 30000,
+  });
+}
+
 // ── Model Density (llmfit DaemonSet) ─────────────────────────────────────────────
 
 export function useDensityNodes() {
