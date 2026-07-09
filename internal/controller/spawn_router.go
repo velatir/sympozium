@@ -1107,16 +1107,18 @@ func (sr *SpawnRouter) delegationEdgeTimeout(ctx context.Context, namespace, ins
 	}
 
 	for _, rel := range pack.Spec.Relationships {
-		if rel.Type != "delegation" || rel.Source != source || rel.Target != targetPersona || rel.Timeout == "" {
+		if rel.Type != "delegation" || rel.Source != source || rel.Target != targetPersona {
 			continue
 		}
-		d, err := time.ParseDuration(rel.Timeout)
-		if err != nil || d <= 0 {
-			sr.Log.Error(err, "ignoring invalid relationships[].timeout",
-				"ensemble", packName, "source", source, "target", targetPersona, "timeout", rel.Timeout)
+		d := rel.ParseTimeout()
+		if d == nil {
+			if rel.Timeout != "" {
+				sr.Log.Info("ignoring invalid relationships[].timeout",
+					"ensemble", packName, "source", source, "target", targetPersona, "timeout", rel.Timeout)
+			}
 			return 0, false
 		}
-		return d, true
+		return d.Duration, true
 	}
 	return 0, false
 }

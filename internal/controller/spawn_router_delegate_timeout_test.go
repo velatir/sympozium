@@ -211,6 +211,15 @@ func TestExpireDelegation_UnblocksParentAndDeletesChild(t *testing.T) {
 	if len(parent.Status.Delegates) != 1 || parent.Status.Delegates[0].Phase != sympoziumv1alpha1.AgentRunPhaseFailed {
 		t.Errorf("parent delegate status not marked failed: %+v", parent.Status.Delegates)
 	}
+	if parent.Status.Delegates[0].Error != res.Error {
+		t.Errorf("delegate status error = %q, want %q", parent.Status.Delegates[0].Error, res.Error)
+	}
+
+	// With its only delegate terminal, the parent leaves AwaitingDelegate so the
+	// controller resumes timeout checking on it.
+	if parent.Status.Phase != sympoziumv1alpha1.AgentRunPhaseRunning {
+		t.Errorf("parent phase = %q, want Running after its last delegate settled", parent.Status.Phase)
+	}
 }
 
 func TestExpireDelegation_NoopAfterChildSettled(t *testing.T) {

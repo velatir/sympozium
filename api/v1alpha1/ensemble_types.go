@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -415,6 +417,23 @@ type AgentConfigRelationship struct {
 	// ResultFormat constrains the expected output (e.g. "json", "markdown").
 	// +optional
 	ResultFormat string `json:"resultFormat,omitempty"`
+}
+
+// ParseTimeout returns the edge's Timeout as a duration, or nil when it is
+// unset, malformed, or non-positive. Callers fall back to their own default
+// rather than treating a bad value as zero, which would expire the edge
+// immediately. On a delegation edge the SpawnRouter enforces this as the
+// deadline for the child run; on a sequential edge it is persisted onto the
+// successor's AgentRunSpec.Timeout.
+func (r AgentConfigRelationship) ParseTimeout() *metav1.Duration {
+	if r.Timeout == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(r.Timeout)
+	if err != nil || d <= 0 {
+		return nil
+	}
+	return &metav1.Duration{Duration: d}
 }
 
 // InstalledAgentConfig tracks the resources created for one persona.
