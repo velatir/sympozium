@@ -1068,6 +1068,7 @@ func (r *AgentRunReconciler) triggerSequentialSuccessors(ctx context.Context, lo
 				VolumeMounts:     targetInst.Spec.VolumeMounts,
 				Env:              targetInst.Spec.Agents.Default.Env,
 				Timeout:          targetInst.Spec.Agents.Default.ParseRunTimeout(),
+				ToolPolicy:       lookupToolPolicyForAgent(ctx, r.Client, &targetInst),
 			},
 		}
 
@@ -2314,6 +2315,19 @@ func (r *AgentRunReconciler) buildContainers(
 	containers[0].Env = append(containers[0].Env,
 		corev1.EnvVar{Name: "TOOLS_ENABLED", Value: "true"},
 	)
+
+	if agentRun.Spec.ToolPolicy != nil {
+		if len(agentRun.Spec.ToolPolicy.Allow) > 0 {
+			containers[0].Env = append(containers[0].Env,
+				corev1.EnvVar{Name: "TOOL_POLICY_ALLOW", Value: strings.Join(agentRun.Spec.ToolPolicy.Allow, ",")},
+			)
+		}
+		if len(agentRun.Spec.ToolPolicy.Deny) > 0 {
+			containers[0].Env = append(containers[0].Env,
+				corev1.EnvVar{Name: "TOOL_POLICY_DENY", Value: strings.Join(agentRun.Spec.ToolPolicy.Deny, ",")},
+			)
+		}
+	}
 
 	// Expose the list of attached skill-sidecar targets to the agent runner
 	// so it can advise the LLM (and validate) on the optional `target` arg

@@ -16,6 +16,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
@@ -165,13 +166,16 @@ func (s *Spawner) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResult, er
 		},
 	}
 
-	// Look up the instance to propagate lifecycle hooks and env to sub-agents.
+	// Look up the instance to propagate lifecycle hooks, env, and tool policy to sub-agents.
 	var inst sympoziumv1alpha1.Agent
 	if err := s.Client.Get(ctx, client.ObjectKey{Namespace: req.Namespace, Name: req.InstanceName}, &inst); err == nil {
 		agentRun.Spec.Lifecycle = inst.Spec.Agents.Default.Lifecycle
 		agentRun.Spec.Env = inst.Spec.Agents.Default.Env
 		if agentRun.Spec.Timeout == nil {
 			agentRun.Spec.Timeout = inst.Spec.Agents.Default.ParseRunTimeout()
+		}
+		if agentRun.Spec.ToolPolicy == nil {
+			agentRun.Spec.ToolPolicy = resolveToolPolicyFromAgent(ctx, s.Client, &inst)
 		}
 	}
 
@@ -308,4 +312,31 @@ func (s *Spawner) resolvePersonaTarget(ctx context.Context, req SpawnRequest) (S
 	)
 
 	return req, nil
+}
+
+// resolveToolPolicyFromAgent looks up the Ensemble that owns the Agent instance
+// and returns the matching AgentConfig's ToolPolicy converted to a ToolPolicySpec.
+func resolveToolPolicyFromAgent(ctx context.Context, c client.Reader, inst *sympoziumv1alpha1.Agent) *sympoziumv1alpha1.ToolPolicySpec {
+	ensembleName := inst.Labels["sympozium.ai/ensemble"]
+	configName := inst.Labels["sympozium.ai/agent-config"]
+	if ensembleName == "" || configName == "" {
+		return nil
+	}
+	var ensemble sympoziumv1alpha1.Ensemble
+	if err := c.Get(ctx, types.NamespacedName{Name: ensembleName, Namespace: inst.Namespace}, &ensemble); err != nil {
+		return nil
+	}
+	for i := range ensemble.Spec.AgentConfigs {
+		if ensemble.Spec.AgentConfigs[i].Name == configName {
+			tp := ensemble.Spec.AgentConfigs[i].ToolPolicy
+			if tp == nil {
+				return nil
+			}
+			return &sympoziumv1alpha1.ToolPolicySpec{
+				Allow: tp.Allow,
+				Deny:  tp.Deny,
+			}
+		}
+	}
+	return nil
 }

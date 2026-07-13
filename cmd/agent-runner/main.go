@@ -445,6 +445,43 @@ func main() {
 		log.Printf("workflow memory tools loaded: %d tool(s) (access: %s)", len(wfMemTools), workflowMemoryAccess)
 	}
 
+	// Apply tool policy: allow/deny lists filter the assembled tool set.
+	// - allow only: all tools not in the allow list are denied (allowlist mode)
+	// - deny only: tools in the deny list are removed (blocklist mode)
+	// - both: allow takes precedence — only allowed tools pass, denied are also removed (least privilege)
+	allowList := os.Getenv("TOOL_POLICY_ALLOW")
+	denyList := os.Getenv("TOOL_POLICY_DENY")
+	if allowList != "" || denyList != "" {
+		allowed := make(map[string]bool)
+		for _, name := range strings.Split(allowList, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				allowed[name] = true
+			}
+		}
+		denied := make(map[string]bool)
+		for _, name := range strings.Split(denyList, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				denied[name] = true
+			}
+		}
+		useAllowlist := len(allowed) > 0
+		filtered := tools[:0]
+		for _, t := range tools {
+			if denied[t.Name] {
+				log.Printf("tool policy: denied tool %q", t.Name)
+				continue
+			}
+			if useAllowlist && !allowed[t.Name] {
+				log.Printf("tool policy: tool %q not in allow list", t.Name)
+				continue
+			}
+			filtered = append(filtered, t)
+		}
+		tools = filtered
+	}
+
 	apiKey := firstNonEmpty(
 		os.Getenv("API_KEY"),
 		os.Getenv("OPENAI_API_KEY"),

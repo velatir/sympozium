@@ -258,6 +258,7 @@ func (r *SympoziumScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			VolumeMounts:     instance.Spec.VolumeMounts,
 			Env:              instance.Spec.Agents.Default.Env,
 			Timeout:          instance.Spec.Agents.Default.ParseRunTimeout(),
+			ToolPolicy:       lookupToolPolicyForAgent(ctx, r.Client, instance),
 		},
 	}
 
