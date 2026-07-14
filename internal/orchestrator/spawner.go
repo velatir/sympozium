@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/toolpolicy"
 )
 
 var spawnerTracer = otel.Tracer("sympozium.ai/spawner")
@@ -165,13 +166,16 @@ func (s *Spawner) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResult, er
 		},
 	}
 
-	// Look up the instance to propagate lifecycle hooks and env to sub-agents.
+	// Look up the instance to propagate lifecycle hooks, env, and tool policy to sub-agents.
 	var inst sympoziumv1alpha1.Agent
 	if err := s.Client.Get(ctx, client.ObjectKey{Namespace: req.Namespace, Name: req.InstanceName}, &inst); err == nil {
 		agentRun.Spec.Lifecycle = inst.Spec.Agents.Default.Lifecycle
 		agentRun.Spec.Env = inst.Spec.Agents.Default.Env
 		if agentRun.Spec.Timeout == nil {
 			agentRun.Spec.Timeout = inst.Spec.Agents.Default.ParseRunTimeout()
+		}
+		if agentRun.Spec.ToolPolicy == nil {
+			agentRun.Spec.ToolPolicy = toolpolicy.ForAgent(ctx, s.Client, &inst)
 		}
 	}
 

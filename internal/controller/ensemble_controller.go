@@ -23,6 +23,7 @@ import (
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
+	"github.com/sympozium-ai/sympozium/internal/toolpolicy"
 )
 
 const ensembleFinalizer = "sympozium.ai/ensemble-finalizer"
@@ -1526,6 +1527,7 @@ func (r *EnsembleReconciler) deliverStimulus(ctx context.Context, log logr.Logge
 			VolumeMounts:     targetInst.Spec.VolumeMounts,
 			Env:              targetInst.Spec.Agents.Default.Env,
 			Timeout:          targetInst.Spec.Agents.Default.ParseRunTimeout(),
+			ToolPolicy:       toolpolicy.ForAgent(ctx, r.Client, &targetInst),
 		},
 	}
 
