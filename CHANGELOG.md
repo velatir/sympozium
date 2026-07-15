@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.10.43](https://github.com/sympozium-ai/sympozium/compare/v0.10.42...v0.10.43) (2026-07-15)
+
+
+### Features
+
+* AgentRun dollar cost estimation with simulated pricing overlay ([798aa3f](https://github.com/sympozium-ai/sympozium/commit/798aa3f36c1d211b94858931580e0768ba21b738))
+* AgentRun dollar cost estimation with simulated pricing overlay ([dfe8fdf](https://github.com/sympozium-ai/sympozium/commit/dfe8fdfcf4cac3418cca117eb4c8469a0c9550df))
+* **controller:** opt-in controller-side delegation executor with guardrails + telemetry ([0179b44](https://github.com/sympozium-ai/sympozium/commit/0179b4420465c44809f39fc1bb3e52c9c6334162))
+* implement allow/deny tool policy semantics ([dfb12dd](https://github.com/sympozium-ai/sympozium/commit/dfb12dde8175aede5c1a45b556dcaed649444854))
+* ToolPolicy allow/deny propagation and runner-side filtering ([ebcdafe](https://github.com/sympozium-ai/sympozium/commit/ebcdafef29e18c60f60e6feade0e641eecaffbe4))
+* **web:** show estimated spend inline in the conversation panel ([87f4435](https://github.com/sympozium-ai/sympozium/commit/87f443574100c82c7be090a195bac5c4df1c0fca))
+* **web:** single effective spend value with totals per page and conversation ([46e6537](https://github.com/sympozium-ai/sympozium/commit/46e6537f105f3edb0c628849fd4418c46a1b549d))
+* wire ToolPolicy.Deny to agent-runner tool filtering (VEL-1084) ([6bd88e4](https://github.com/sympozium-ai/sympozium/commit/6bd88e4ca082e725fcd9afe78f8da4241767850e))
+
+
+### Bug Fixes
+
+* **controller:** reject forged token metrics from agent result markers ([8227556](https://github.com/sympozium-ai/sympozium/commit/8227556c3616030c4d25740fb730ef4822d12180))
+* propagate Ensemble toolPolicy to AgentRun pods ([67b9161](https://github.com/sympozium-ai/sympozium/commit/67b9161e032c409534ade952a6ae05119afacd9a))
+
 ## [0.10.42](https://github.com/sympozium-ai/sympozium/compare/v0.10.41...v0.10.42) (2026-07-09)
 
 
