@@ -1899,24 +1899,54 @@ func TestBuildHandoffTask_NoTargetTask(t *testing.T) {
 	}
 }
 
-func TestBuildHandoffTask_TruncatesResult(t *testing.T) {
-	longResult := strings.Repeat("x", 1000)
-	got := buildHandoffTask("researcher", "task", longResult, "next")
-	if !strings.Contains(got, "...") {
-		t.Error("expected truncation marker in result")
+func TestBuildHandoffTask_PassesResultsUnderTheLimitIntact(t *testing.T) {
+	// A result comfortably under the cap must arrive whole. A report handed to
+	// a reviewer is the payload of the whole edge; clipping it silently makes
+	// the reviewer critique a fragment.
+	result := strings.Repeat("x", handoffResultMaxChars-1)
+	got := buildHandoffTask("writer", "task", result, "review it")
+	if !strings.Contains(got, result) {
+		t.Error("result under the limit should pass through unmodified")
 	}
-	// Result section should be at most 803 chars (800 + "...")
+	if strings.Contains(got, "[truncated:") {
+		t.Error("result under the limit should not be marked truncated")
+	}
+}
+
+func TestBuildHandoffTask_TruncatesResult(t *testing.T) {
+	longResult := strings.Repeat("x", handoffResultMaxChars+500)
+	got := buildHandoffTask("researcher", "task", longResult, "next")
+
+	// The notice must name the truncation explicitly. A bare "..." is
+	// indistinguishable from an ellipsis, so a successor cannot tell that data
+	// is missing and will act on the fragment as if it were complete.
+	if !strings.Contains(got, "[truncated:") {
+		t.Error("expected an explicit truncation notice in the result")
+	}
+	if !strings.Contains(got, "researcher") {
+		t.Error("truncation notice should name the source persona to ask for the full text")
+	}
+	if !strings.Contains(got, fmt.Sprintf("produced %d characters", handoffResultMaxChars+500)) {
+		t.Error("truncation notice should report the original length, not the clipped one")
+	}
+
 	idx := strings.Index(got, "### Result\n")
 	if idx < 0 {
 		t.Fatal("missing Result section")
 	}
 	resultSection := got[idx+len("### Result\n"):]
-	endIdx := strings.Index(resultSection, "\n\n### ")
-	if endIdx >= 0 {
+	if endIdx := strings.Index(resultSection, "\n\n### "); endIdx >= 0 {
 		resultSection = resultSection[:endIdx]
 	}
-	if len(resultSection) > 803 {
-		t.Errorf("result section too long: %d chars", len(resultSection))
+
+	// Measure the carried payload — the text before the notice — rather than
+	// the whole section, which also contains the notice's own prose.
+	payload := resultSection
+	if n := strings.Index(payload, "\n\n[truncated:"); n >= 0 {
+		payload = payload[:n]
+	}
+	if payload != strings.Repeat("x", handoffResultMaxChars) {
+		t.Errorf("carried payload = %d chars, want exactly %d", len(payload), handoffResultMaxChars)
 	}
 }
 

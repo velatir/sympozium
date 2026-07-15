@@ -1518,13 +1518,34 @@ func sequentialRunTimeout(rel sympoziumv1alpha1.AgentConfigRelationship, target 
 	return target.Spec.Agents.Default.ParseRunTimeout()
 }
 
+// Handoff cards are injected into the successor's prompt, so both halves are
+// bounded to keep a long chain from crowding out the successor's own context.
+const (
+	// handoffTaskMaxChars bounds the restated predecessor task. It is only
+	// there for orientation, so it stays short.
+	handoffTaskMaxChars = 200
+	// handoffResultMaxChars bounds the predecessor's result. Deliberately far
+	// larger than the task: the result is the actual payload, and clipping it
+	// too hard is what makes a successor act on a stub.
+	handoffResultMaxChars = 4000
+)
+
 func buildHandoffTask(sourcePersona, predecessorTask, predecessorResult, targetTask string) string {
 	originalTask := extractOriginalTask(predecessorTask)
-	if len(originalTask) > 200 {
-		originalTask = originalTask[:200] + "..."
+	if len(originalTask) > handoffTaskMaxChars {
+		originalTask = originalTask[:handoffTaskMaxChars] + "..."
 	}
-	if len(predecessorResult) > 800 {
-		predecessorResult = predecessorResult[:800] + "..."
+	// Say so out loud when the result is clipped. A bare "..." reads as an
+	// ellipsis rather than missing data, and a successor that cannot tell the
+	// difference will confidently act on a fragment — reviewing a summary as
+	// though it were the report.
+	if len(predecessorResult) > handoffResultMaxChars {
+		predecessorResult = predecessorResult[:handoffResultMaxChars] + fmt.Sprintf(
+			"\n\n[truncated: %s produced %d characters and this handoff carries the first %d. "+
+				"Do not treat the text above as the complete result. If you need all of it, ask %s to "+
+				"publish it to shared workflow memory with workflow_memory_store and retrieve it with "+
+				"workflow_memory_search.]",
+			sourcePersona, len(predecessorResult), handoffResultMaxChars, sourcePersona)
 	}
 	if targetTask == "" {
 		targetTask = "Continue the workflow as your role requires."
