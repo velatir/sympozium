@@ -566,7 +566,8 @@ func (b *Bridge) watchPromptRequests(ctx context.Context) {
 			return
 		case fe := <-events:
 			filename := filepath.Base(fe.Path)
-			if strings.HasPrefix(filename, "request-") {
+			// Skip tmp files: see watchContextClear for rationale.
+			if strings.HasPrefix(filename, "request-") && !strings.HasSuffix(filename, ".tmp") {
 				b.handlePromptRequest(ctx, fe)
 			}
 		}
@@ -629,7 +630,8 @@ func (b *Bridge) watchPromptResults(ctx context.Context) {
 			return
 		case fe := <-events:
 			filename := filepath.Base(fe.Path)
-			if strings.HasPrefix(filename, "result-") {
+			// Skip tmp files: see watchContextClear for rationale.
+			if strings.HasPrefix(filename, "result-") && !strings.HasSuffix(filename, ".tmp") {
 				b.handlePromptResultAudit(ctx, fe)
 			}
 		}
@@ -690,7 +692,11 @@ func (b *Bridge) watchContextClear(ctx context.Context) {
 			return
 		case fe := <-events:
 			filename := filepath.Base(fe.Path)
-			if strings.HasPrefix(filename, "clear-") {
+			// Skip tmp files: the sidecar's writeJsonAtomic helper writes
+			// {path}.tmp then renames to {path}. fsnotify reports both Create
+			// events, and reading the .tmp before the rename returns
+			// "no such file" because the rename already happened.
+			if strings.HasPrefix(filename, "clear-") && !strings.HasSuffix(filename, ".tmp") {
 				b.handleContextClear(ctx, fe)
 			}
 		}
