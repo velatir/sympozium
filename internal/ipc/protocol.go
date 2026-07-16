@@ -203,8 +203,8 @@ type PromptRequest struct {
 type PromptResult struct {
 	RequestID string          `json:"requestId"`
 	Status    string          `json:"status"`
-	Content   string          `json:"content,omitempty"`  // raw model text
-	Parsed    json.RawMessage `json:"parsed,omitempty"`   // schema-validated payload when Schema was set
+	Content   string          `json:"content,omitempty"` // raw model text
+	Parsed    json.RawMessage `json:"parsed,omitempty"`  // schema-validated payload when Schema was set
 	Error     string          `json:"error,omitempty"`
 	Metrics   struct {
 		InputTokens  int `json:"inputTokens"`

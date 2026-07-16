@@ -20,14 +20,14 @@ import (
 // It also handles all OpenAI-compatible backends: LM Studio, Ollama, vLLM,
 // llamacpp, Azure OpenAI, and any OpenAI-schema provider.
 type openaiProvider struct {
-	client         openai.Client
-	provider       string // provider identifier for telemetry ("openai", "lm-studio", …)
-	model          string
-	messages       []openai.ChatCompletionMessageParamUnion
-	system         string             // system prompt kept separately so ResetContext can rebuild
-	initialTask    string             // initial user turn (kept for ResetContext to restore)
-	tools          []openai.ChatCompletionToolUnionParam
-	promptPrompt   string // Most recent sidecar-driven prompt for tool-forcing schema delivery
+	client       openai.Client
+	provider     string // provider identifier for telemetry ("openai", "lm-studio", …)
+	model        string
+	messages     []openai.ChatCompletionMessageParamUnion
+	system       string // system prompt kept separately so ResetContext can rebuild
+	initialTask  string // initial user turn (kept for ResetContext to restore)
+	tools        []openai.ChatCompletionToolUnionParam
+	promptPrompt string // Most recent sidecar-driven prompt for tool-forcing schema delivery
 }
 
 // newOpenAIProvider constructs an openaiProvider with the given config.
@@ -85,10 +85,10 @@ func newOpenAIProvider(provider, apiKey, baseURL, model, systemPrompt, task stri
 	}
 
 	p := &openaiProvider{
-		client:   openai.NewClient(opts...),
-		provider: provider,
-		model:    model,
-		system:   systemPrompt,
+		client:      openai.NewClient(opts...),
+		provider:    provider,
+		model:       model,
+		system:      systemPrompt,
 		initialTask: task,
 		messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
@@ -249,10 +249,10 @@ func (p *openaiProvider) Prompt(ctx context.Context, prompt string, useContext b
 	}
 	if len(schema) > 0 {
 		var format struct {
-			Type       string          `json:"type"`
-			Name       string          `json:"name"`
-			Schema     json.RawMessage `json:"schema"`
-			Strict     *bool           `json:"strict,omitempty"`
+			Type   string          `json:"type"`
+			Name   string          `json:"name"`
+			Schema json.RawMessage `json:"schema"`
+			Strict *bool           `json:"strict,omitempty"`
 		}
 		if err := json.Unmarshal(schema, &format); err == nil && format.Type == "json_schema" {
 			params.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{

@@ -70,9 +70,9 @@ const (
 
 	// ContextClear is the agent-runner inbound event the bridge publishes when
 	// a sidecar writes /ipc/context/clear-{RequestID}.json.
-	TopicContextClear = "agent.context.clear"
-	TopicScheduleUpsert       = "schedule.upsert"
-	TopicStimulusDelivered    = "ensemble.stimulus.delivered"
+	TopicContextClear      = "agent.context.clear"
+	TopicScheduleUpsert    = "schedule.upsert"
+	TopicStimulusDelivered = "ensemble.stimulus.delivered"
 
 	// Density telemetry (from llmfit DaemonSet via FitnessCache)
 	TopicDensityUpdated     = "density.updated"           // per-node fitness snapshot
