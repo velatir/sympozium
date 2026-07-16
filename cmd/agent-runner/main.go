@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -514,6 +515,38 @@ func main() {
 		err          error
 	)
 
+	// VEL-1081: launch the prompt service in parallel with the main agent
+	// loop. The sidecar-initiated orchestrator drives its per-service loop
+	// from inside one of the agent's tool calls (e.g. sd_collector_start_run)
+	// and writes /ipc/prompts/request-*.json while the main loop is still
+	// running, so the prompt service must be live *during* the main loop,
+	// not only after it. The goroutine exits when /ipc/done is written, the
+	// run context is cancelled, or the loop returns an error. wg.Wait
+	// below guarantees the prompt service has drained before the agent-runner
+	// exits, so the sidecar's request poll never times out waiting for a
+	// result that arrives after the runner tore down.
+	var promptWg sync.WaitGroup
+	if getEnv("ENABLE_PROMPT_SERVICE", "") == "true" {
+		promptWg.Add(1)
+		go func() {
+			defer promptWg.Done()
+			if promptErr := runPromptServiceLoop(promptServiceDeps{
+				Ctx:             ctx,
+				ProviderName:    provider,
+				APIKey:          apiKey,
+				BaseURL:         baseURL,
+				Model:           modelName,
+				SystemPrompt:    systemPrompt,
+				Task:            task,
+				Tools:           tools,
+				ProviderHeaders: providerHeaders,
+			}); promptErr != nil {
+				log.Printf("prompt service exited with error: %v", promptErr)
+			}
+		}()
+	}
+	defer promptWg.Wait()
+
 	switch provider {
 	case "anthropic":
 		responseText, inputTokens, outputTokens, toolCalls, err = callAnthropic(ctx, apiKey, baseURL, modelName, systemPrompt, task, tools, providerHeaders)
@@ -527,27 +560,14 @@ func main() {
 		responseText, inputTokens, outputTokens, toolCalls, err = callOpenAI(ctx, provider, apiKey, baseURL, modelName, systemPrompt, task, tools, providerHeaders)
 	}
 
-	// After the main agent loop completes, keep the agent-runner alive to
-	// serve sidecar-initiated LLM prompt requests (VEL-1081). This blocks
-	// until /ipc/done is written, context is cancelled, or the run timeout
-	// elapses. Sidecars write /ipc/prompts/request-*.json to ask the model a
-	// question; we answer with the same provider (so context survives) and
-	// write the response to /ipc/prompts/result-*.json.
-	if err == nil && getEnv("ENABLE_PROMPT_SERVICE", "") == "true" {
-		if promptErr := runPromptServiceLoop(promptServiceDeps{
-			Ctx:             ctx,
-			ProviderName:    provider,
-			APIKey:          apiKey,
-			BaseURL:         baseURL,
-			Model:           modelName,
-			SystemPrompt:    systemPrompt,
-			Task:            task,
-			Tools:           tools,
-			ProviderHeaders: providerHeaders,
-		}); promptErr != nil {
-			log.Printf("prompt service exited with error: %v", promptErr)
-		}
-	}
+	// After the main agent loop completes, the prompt service continues to
+	// serve sidecar-initiated LLM prompt requests (VEL-1081) until /ipc/done
+	// is written (typically by the sidecar after save_batch) or the run
+	// context is cancelled. Sidecars write /ipc/prompts/request-*.json to
+	// ask the model a question; we answer with the same provider (so
+	// context survives) and write the response to
+	// /ipc/prompts/result-*.json. promptWg.Wait (above via defer) drains
+	// the goroutine before this function returns.
 
 	elapsed := time.Since(start)
 
