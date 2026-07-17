@@ -1939,6 +1939,18 @@ func (r *AgentRunReconciler) buildContainers(
 		})
 	}
 
+	// Init (VEL-1081): when set, the agent-runner runs in `prompt-server`
+	// mode — it skips the main agent loop entirely and just listens on
+	// /ipc/prompts/ for the named sidecar to drive individual LLM calls.
+	// The 120s per-tool cap does not apply because the orchestrator is a
+	// peer process, not a tool call.
+	if agentRun.Spec.Init != nil {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name:  "AGENT_MODE",
+			Value: "prompt-server",
+		})
+	}
+
 	// Inject RUN_TIMEOUT from the AgentRun spec or instance config.
 	if agentRun.Spec.Timeout != nil {
 		agentEnv = append(agentEnv, corev1.EnvVar{
@@ -2406,6 +2418,29 @@ func (r *AgentRunReconciler) buildContainers(
 		})
 		for _, e := range sc.sidecar.Env {
 			envVars = append(envVars, toCoreEnvVar(e))
+		}
+
+		// Init (VEL-1081): when this sidecar is the named initiator, set
+		// SYMPOZIUM_RUN_CONFIG_JSON to the JSON-serialised init.parameters.
+		// The sidecar's CLI parses this env to bootstrap its orchestrator
+		// (typically by writing /ipc/run-config.json from it, or using it
+		// in-memory). This avoids an LLM round-trip just to start the
+		// workflow — particularly important for sidecar-initiated runs
+		// where the LLM is not the workflow driver.
+		if agentRun.Spec.Init != nil && agentRun.Spec.Init.Sidecar == sc.skillPackName {
+			paramsJSON, err := json.Marshal(map[string]string(agentRun.Spec.Init.Parameters))
+			if err != nil {
+				slog.Warn("failed to marshal init.parameters for sidecar",
+					"agentrun", agentRun.Name,
+					"sidecar", sc.skillPackName,
+					"err", err,
+				)
+			} else {
+				envVars = append(envVars, corev1.EnvVar{
+					Name:  "SYMPOZIUM_RUN_CONFIG_JSON",
+					Value: string(paramsJSON),
+				})
+			}
 		}
 
 		mounts := []corev1.VolumeMount{

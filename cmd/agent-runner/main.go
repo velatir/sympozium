@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -130,6 +132,12 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.Println("agent-runner starting")
 
+	// Top-level run context. Prompt-server mode (AGENT_MODE=prompt-server)
+	// exits via runPromptServer before we get to the timeout-aware ctx below,
+	// so it gets its own background-derived context with a SIGTERM handler.
+	runCtx, runCancel := contextWithSignal(context.Background())
+	defer runCancel()
+
 	// Skip mode: a preRun lifecycle hook wrote the skip marker on the shared
 	// /ipc volume to signal there is no work to do. Short-circuit before the
 	// LLM call (and before the empty-TASK guard below) so the run spends no
@@ -165,6 +173,17 @@ func main() {
 		}
 	}
 	if task == "" {
+		// Prompt-server mode (VEL-1081): the sidecar is the workflow driver,
+		// so there is no TASK for the LLM to receive. We don't read
+		// /ipc/input/task.json or run the main agent loop; we just listen on
+		// /ipc/prompts/ for the sidecar to drive individual LLM calls. Exit
+		// when /ipc/run-result.json appears (the sidecar writes it once its
+		// workflow completes) so the controller can surface the result on
+		// the AgentRun via `kubectl describe`.
+		if getEnv("AGENT_MODE", "") == "prompt-server" {
+			runPromptServer(runCtx)
+			os.Exit(0)
+		}
 		fatal("TASK env var is empty and no /ipc/input/task.json found")
 	}
 
@@ -712,6 +731,26 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// contextWithSignal returns a context cancelled on SIGINT/SIGTERM. The cancel
+// function is what callers defer to release the signal handler. Used for the
+// top-level run context so prompt-server mode (which runs before the
+// timeout-aware ctx is built) still shuts down cleanly when the pod is
+// terminated.
+func contextWithSignal(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case sig := <-sigCh:
+			log.Printf("received signal %s, cancelling run context", sig)
+			cancel()
+		}
+	}()
+	return ctx, cancel
+}
+
 // readSkipMarker reports whether a preRun hook requested the run be skipped by
 // writing the skip marker at path on the shared /ipc volume. The trimmed file
 // contents are returned as the human-readable skip reason.
@@ -868,4 +907,106 @@ func buildRelationshipContext(relJSON string) string {
 	}
 
 	return sb.String()
+}
+
+// runPromptServer (VEL-1081) is the entry point for AGENT_MODE=prompt-server.
+// The sidecar is the workflow driver, so the agent-runner skips the main
+// agent loop entirely. It runs the prompt service loop in a goroutine so
+// the sidecar can drive individual LLM calls via /ipc/prompts/, and exits
+// when /ipc/run-result.json appears (the sidecar writes it once its workflow
+// completes). On exit it copies the result payload to /ipc/output/result.json
+// and emits the SYMPOZIUM_RESULT log line so the controller can surface the
+// final payload on the AgentRun for `kubectl describe` to display.
+func runPromptServer(ctx context.Context) {
+	start := time.Now()
+
+	_ = os.MkdirAll("/ipc/output", 0o755)
+
+	provider := strings.ToLower(getEnv("MODEL_PROVIDER", "openai"))
+	apiKey := firstNonEmpty(
+		os.Getenv("API_KEY"),
+		os.Getenv("OPENAI_API_KEY"),
+		os.Getenv("ANTHROPIC_API_KEY"),
+		os.Getenv("AZURE_OPENAI_API_KEY"),
+		os.Getenv("PROVIDER_API_KEY"),
+		os.Getenv("LLM_API_KEY"),
+	)
+	if fileKey, err := os.ReadFile("/secrets/api-key"); err == nil {
+		apiKey = firstNonEmpty(apiKey, strings.TrimSpace(string(fileKey)))
+	}
+	baseURL := strings.TrimRight(getEnv("MODEL_BASE_URL", ""), "/")
+	modelName := getEnv("MODEL_NAME", "gpt-4o-mini")
+	systemPrompt := getEnv("SYSTEM_PROMPT", "You are a helpful AI assistant.")
+
+	var providerHeaders map[string]string
+	if headersJSON := getEnv("MODEL_PROVIDER_HEADERS", ""); headersJSON != "" {
+		if err := json.Unmarshal([]byte(headersJSON), &providerHeaders); err != nil {
+			log.Printf("WARNING: failed to parse MODEL_PROVIDER_HEADERS: %v", err)
+		}
+	}
+
+	// In prompt-server mode the LLM has no conversational task — it just
+	// answers action decisions issued by the sidecar. An empty system prompt
+	// is fine; the sidecar passes the actual prompt on each request.
+	log.Printf("prompt-server mode: provider=%s model=%s", provider, modelName)
+
+	var promptWg sync.WaitGroup
+	promptWg.Add(1)
+	go func() {
+		defer promptWg.Done()
+		if err := runPromptServiceLoop(promptServiceDeps{
+			Ctx:             ctx,
+			ProviderName:    provider,
+			APIKey:          apiKey,
+			BaseURL:         baseURL,
+			Model:           modelName,
+			SystemPrompt:    systemPrompt,
+			Task:            "",
+			Tools:           nil,
+			ProviderHeaders: providerHeaders,
+		}); err != nil {
+			log.Printf("prompt service exited with error: %v", err)
+		}
+	}()
+
+	resultPath := "/ipc/run-result.json"
+	poll := time.NewTicker(500 * time.Millisecond)
+	defer poll.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("prompt-server: context cancelled, waiting for prompt service to drain")
+			promptWg.Wait()
+			return
+		case <-poll.C:
+			data, err := os.ReadFile(resultPath)
+			if err != nil {
+				continue
+			}
+			log.Printf("prompt-server: %s observed after %s, exiting", resultPath, time.Since(start))
+
+			var result agentResult
+			if uerr := json.Unmarshal(data, &result); uerr != nil {
+				log.Printf("prompt-server: %s was not a valid agentResult payload (%v); wrapping raw bytes", resultPath, uerr)
+				result = agentResult{
+					Status:   "success",
+					Response: string(data),
+				}
+			}
+			if result.Metrics.DurationMs == 0 {
+				result.Metrics.DurationMs = time.Since(start).Milliseconds()
+			}
+
+			writeJSON("/ipc/output/result.json", result)
+			_ = os.WriteFile("/ipc/done", []byte("done"), 0o644)
+
+			if markerBytes, err := json.Marshal(result); err == nil {
+				fmt.Fprintf(os.Stdout, "\n__SYMPOZIUM_RESULT__%s__SYMPOZIUM_END__\n", string(markerBytes))
+			}
+			log.Println("prompt-server finished")
+			promptWg.Wait()
+			return
+		}
+	}
 }

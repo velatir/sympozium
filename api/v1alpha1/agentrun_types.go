@@ -103,6 +103,22 @@ type AgentRunSpec struct {
 	// +kubebuilder:default=true
 	UseContext *bool `json:"useContext,omitempty"`
 
+	// Init declares that the run should be sidecar-initiated instead of
+	// LLM-initiated. When set, the sympozium controller renders the pod
+	// with the named sidecar as the primary workload (the sidecar drives
+	// the workflow) and the agent-runner in `prompt-server` mode (a thin
+	// LLM sub-call answering action decisions via /ipc/prompts/). The 120s
+	// per-tool cap does not apply because the orchestrator is not a tool
+	// call — it is a peer process in the pod.
+	//
+	// When unset, behaviour is unchanged: the LLM drives the workflow by
+	// calling tools itself. Backwards compatible with all pre-existing
+	// AgentRuns.
+	//
+	// Part of VEL-1081.
+	// +optional
+	Init *RunInit `json:"init,omitempty"`
+
 	// Volumes are additional pod volumes to attach to the agent pod.
 	// Typically populated from Agent.Spec.Volumes by the controller,
 	// but may also be set directly on an AgentRun. Useful for mounting
@@ -129,6 +145,46 @@ type ParentRunRef struct {
 
 	// SpawnDepth is how many levels deep this sub-agent is.
 	SpawnDepth int `json:"spawnDepth"`
+}
+
+// RunInit declares that the run should be sidecar-initiated instead of
+// LLM-initiated. When set, the sympozium controller renders the pod
+// with the named sidecar as the primary workload (the sidecar drives
+// the workflow) and the agent-runner in `prompt-server` mode (a thin
+// LLM sub-call answering action decisions via /ipc/prompts/). The 120s
+// per-tool cap does not apply because the orchestrator is not a tool
+// call — it is a peer process in the pod.
+//
+// When unset, behaviour is unchanged: the LLM drives the workflow by
+// calling tools itself. Backwards compatible with all pre-existing
+// AgentRuns.
+//
+// Part of VEL-1081.
+type RunInit struct {
+	// Sidecar is the name of the sidecar (as declared in the SkillPack) that
+	// is the primary process for this run. The controller resolves this
+	// against the resolved SkillRefs on this AgentRun and uses the matched
+	// SkillSidecar as the orchestrator pod. Required because an AgentRun
+	// may host multiple sidecars.
+	// +kubebuilder:validation:Required
+	Sidecar string `json:"sidecar"`
+
+	// Tool is the tool-call name to invoke in the named sidecar. Tool
+	// names are unique across sidecars inside a single AgentRun, so this
+	// field alone is sufficient to route the invocation unambiguously. The
+	// named sidecar's CLI must accept this tool (e.g. via a subcommand)
+	// and read its input manifest from /ipc/run-config.json.
+	// +kubebuilder:validation:Required
+	Tool string `json:"tool"`
+
+	// Parameters are the arguments to pass to the tool. The controller
+	// serialises them to JSON and sets them as the SYMPOZIUM_RUN_CONFIG_JSON
+	// env var on the named sidecar; the sidecar parses that env and writes
+	// /ipc/run-config.json (or uses the parsed value directly) as the
+	// orchestrator's input manifest. This avoids an LLM round-trip just
+	// to bootstrap the workflow.
+	// +optional
+	Parameters map[string]string `json:"parameters,omitempty"`
 }
 
 // ModelSpec defines which LLM to use.
