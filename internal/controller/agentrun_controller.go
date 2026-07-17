@@ -1921,12 +1921,34 @@ func (r *AgentRunReconciler) buildContainers(
 		{Name: "AGENT_RUN_ID", Value: agentRun.Name},
 		{Name: "AGENT_ID", Value: agentRun.Spec.AgentID},
 		{Name: "SESSION_KEY", Value: agentRun.Spec.SessionKey},
+		// VEL-1081-2: when init is set, the sidecar is the workflow driver
+		// and the agent-runner enters prompt-server mode, which requires
+		// TASK to be empty (main.go's prompt-server early-return only
+		// fires when task == ""). Setting TASK from spec.task here would
+		// drop the agent-runner into the main agent loop instead, where
+		// it would try to invoke the named initiator tool as a regular
+		// sidecar-tool call (which then times out, because the named
+		// sidecar is running the tool as its primary process and is not
+		// watching /ipc/tools/ for exec requests). Skip the env var
+		// entirely when init is set so prompt-server mode activates.
 		{Name: "TASK", Value: agentRun.Spec.Task},
 		{Name: "SYSTEM_PROMPT", Value: agentRun.Spec.SystemPrompt},
 		{Name: "MODEL_PROVIDER", Value: agentRun.Spec.Model.Provider},
 		{Name: "MODEL_NAME", Value: agentRun.Spec.Model.Model},
 		{Name: "MODEL_BASE_URL", Value: agentRun.Spec.Model.BaseURL},
 		{Name: "THINKING_MODE", Value: agentRun.Spec.Model.Thinking},
+	}
+	if agentRun.Spec.Init != nil {
+		// Filter TASK out of agentEnv when the run is sidecar-initiated.
+		// Allocates a fresh slice (instead of reusing agentEnv[:0]) so the
+		// iteration can't be aliased into by the append writes below.
+		filtered := make([]corev1.EnvVar, 0, len(agentEnv))
+		for _, e := range agentEnv {
+			if e.Name != "TASK" {
+				filtered = append(filtered, e)
+			}
+		}
+		agentEnv = filtered
 	}
 
 	// UseContext (VEL-1081): propagates the AgentRun-spec UseContext toggle
