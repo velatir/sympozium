@@ -2416,6 +2416,54 @@ func (r *AgentRunReconciler) buildContainers(
 			Name:  "SYMPOZIUM_SKILL_PACK",
 			Value: sc.skillPackName,
 		})
+
+		// Init (VEL-1081): when this sidecar is the named initiator, look up
+		// the named `init.tool` in the sidecar's declared tools and use its
+		// exec + subcommand as the sidecar's primary process. The sidecar's
+		// SkillPack declares the tool's exec (e.g. `["node", "/app/dist/cli.js"]`)
+		// and optional subcommand — this keeps the controller sidecar-
+		// language-agnostic (Go, Rust, Python sidecars all work the same
+		// way) and lets the SkillPack be the authoritative source of what
+		// the initiator tool actually runs. Without this override, the
+		// sidecar defaults to its image CMD (typically tool-executor.sh)
+		// and sits idle in prompt-server mode.
+		if agentRun.Spec.Init != nil && agentRun.Spec.Init.Sidecar == sc.skillPackName {
+			toolName := agentRun.Spec.Init.Tool
+			if toolName == "" {
+				slog.Warn("init: sidecar is named initiator but init.tool is empty; sidecar will use its default CMD",
+					"agentrun", agentRun.Name,
+					"sidecar", sc.skillPackName,
+				)
+			} else {
+				matched := false
+				for _, tool := range sc.sidecar.Tools {
+					if tool.Name != toolName {
+						continue
+					}
+					matched = true
+					// Build argv = tool.Exec + (tool.Subcommand if set).
+					argv := append([]string{}, tool.Exec...)
+					if tool.Subcommand != "" {
+						argv = append(argv, tool.Subcommand)
+					}
+					cmd = argv
+					slog.Info("init: overriding sidecar command from SkillPack tool",
+						"agentrun", agentRun.Name,
+						"sidecar", sc.skillPackName,
+						"tool", toolName,
+						"argv", argv,
+					)
+					break
+				}
+				if !matched {
+					slog.Warn("init: named sidecar has no tool matching init.tool; sidecar will use its default CMD",
+						"agentrun", agentRun.Name,
+						"sidecar", sc.skillPackName,
+						"tool", toolName,
+					)
+				}
+			}
+		}
 		for _, e := range sc.sidecar.Env {
 			envVars = append(envVars, toCoreEnvVar(e))
 		}
