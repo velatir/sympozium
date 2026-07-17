@@ -13,25 +13,32 @@ import (
 //
 // runPromptServer is the entry point for AGENT_MODE=prompt-server. It skips
 // the main agent loop and just listens on /ipc/prompts/ for the sidecar to
-// drive individual LLM calls, exiting when /ipc/run-result.json appears.
+// drive individual LLM calls, exiting when /ipc/done appears.
+//
+// VEL-1081-2: the sidecar is now the authoritative writer of /ipc/done (it
+// writes /ipc/done AFTER orchestrator + save_batch + complete_run have all
+// returned). The agent-runner no longer writes /ipc/done itself — that would
+// re-introduce the in-flight-prompt-cancel race that misclassified successful
+// services as failed and routed them to collector/unreliable.
 //
 // These tests pin the run-result handling without actually invoking an LLM
 // provider (the prompt service goroutine is exercised only in benchmarks /
 // integration tests — the unit tests focus on the file-watching contract).
 
-// TestRunPromptServer_WritesResultOnRunResultJSON exercises the happy path:
-// when /ipc/run-result.json appears, the function copies its payload to
-// /ipc/output/result.json, writes /ipc/done, and emits SYMPOZIUM_RESULT.
-func TestRunPromptServer_WritesResultOnRunResultJSON(t *testing.T) {
+// TestRunPromptServer_ExitsOnDoneMarker exercises the happy path:
+// when /ipc/done appears, the function reads /ipc/run-result.json, copies its
+// payload to /ipc/output/result.json, and emits SYMPOZIUM_RESULT. It must
+// NOT write /ipc/done itself — the sidecar owns that file.
+func TestRunPromptServer_ExitsOnDoneMarker(t *testing.T) {
 	// Redirect IPC paths to a temp directory so we don't pollute /ipc.
 	tmp := t.TempDir()
 	t.Setenv("USE_CONTEXT", "true")
 
 	// Override hardcoded paths in runPromptServer. The function reads from
-	// /ipc/run-result.json and writes to /ipc/output/result.json. We can't
-	// rebind those without modifying the function, so we use a small wrapper
-	// that mirrors the file watch logic but on tmp paths. This validates
-	// the result-handling contract end-to-end without spinning up an LLM.
+	// /ipc/run-result.json and watches /ipc/done. We can't rebind those
+	// without modifying the function, so we use a small wrapper that
+	// mirrors the file watch logic but on tmp paths. This validates the
+	// result-handling contract end-to-end without spinning up an LLM.
 	t.Run("payload round-trips through /ipc/output/result.json", func(t *testing.T) {
 		_ = tmp // referenced via wrapper below
 	})

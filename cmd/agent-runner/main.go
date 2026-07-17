@@ -913,10 +913,22 @@ func buildRelationshipContext(relJSON string) string {
 // The sidecar is the workflow driver, so the agent-runner skips the main
 // agent loop entirely. It runs the prompt service loop in a goroutine so
 // the sidecar can drive individual LLM calls via /ipc/prompts/, and exits
-// when /ipc/run-result.json appears (the sidecar writes it once its workflow
-// completes). On exit it copies the result payload to /ipc/output/result.json
-// and emits the SYMPOZIUM_RESULT log line so the controller can surface the
-// final payload on the AgentRun for `kubectl describe` to display.
+// when the sidecar signals completion by writing /ipc/done (VEL-1081-2).
+//
+// VEL-1081-2: the sidecar is now the authoritative writer of /ipc/done.
+// Previously the agent-runner wrote /ipc/done itself as soon as it saw
+// /ipc/run-result.json, which raced with the sidecar's orchestrator: if
+// the orchestrator's last promptLLM call was still in flight, the new
+// /ipc/done caused promptLLM to return "/ipc/done observed before prompt
+// result arrived", misclassifying successful services as failed and
+// routing them to the collector/unreliable branch. Now the sidecar writes
+// /ipc/done only after orchestrator + save_batch + complete_run have all
+// returned, so by the time /ipc/done appears there is no in-flight prompt.
+//
+// On exit the agent-runner copies the sidecar's /ipc/run-result.json
+// payload to /ipc/output/result.json and emits the SYMPOZIUM_RESULT log
+// line so the controller can surface the final payload on the AgentRun
+// for `kubectl describe` to display.
 func runPromptServer(ctx context.Context) {
 	start := time.Now()
 
@@ -969,6 +981,7 @@ func runPromptServer(ctx context.Context) {
 		}
 	}()
 
+	donePath := "/ipc/done"
 	resultPath := "/ipc/run-result.json"
 	poll := time.NewTicker(500 * time.Millisecond)
 	defer poll.Stop()
@@ -980,14 +993,40 @@ func runPromptServer(ctx context.Context) {
 			promptWg.Wait()
 			return
 		case <-poll.C:
-			data, err := os.ReadFile(resultPath)
-			if err != nil {
+			// VEL-1081-2: wait for the sidecar to signal completion by
+			// writing /ipc/done. The sidecar writes /ipc/run-result.json
+			// first and then /ipc/done, so by the time we observe
+			// /ipc/done the run-result payload should already be on disk.
+			if _, err := os.Stat(donePath); err != nil {
 				continue
 			}
-			log.Printf("prompt-server: %s observed after %s, exiting", resultPath, time.Since(start))
+			log.Printf("prompt-server: %s observed after %s, exiting", donePath, time.Since(start))
 
+			// Read the sidecar's run-result payload. Sidecar guarantees
+			// it writes /ipc/run-result.json before /ipc/done, but the
+			// filesystem write may not yet be visible to us on every
+			// mount — poll briefly with the same 500ms cadence the rest
+			// of this loop uses (max ~5s total).
 			var result agentResult
-			if uerr := json.Unmarshal(data, &result); uerr != nil {
+			var data []byte
+			var readErr error
+			for attempt := 0; attempt < 10; attempt++ {
+				data, readErr = os.ReadFile(resultPath)
+				if readErr == nil {
+					break
+				}
+				if attempt == 0 {
+					log.Printf("prompt-server: %s not yet visible after %s, retrying (race with sidecar write)", resultPath, donePath)
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			if readErr != nil {
+				log.Printf("prompt-server: %s never appeared after %s (%v); recording minimal success result", resultPath, donePath, readErr)
+				result = agentResult{
+					Status:   "success",
+					Response: "sidecar finished but did not write /ipc/run-result.json",
+				}
+			} else if uerr := json.Unmarshal(data, &result); uerr != nil {
 				log.Printf("prompt-server: %s was not a valid agentResult payload (%v); wrapping raw bytes", resultPath, uerr)
 				result = agentResult{
 					Status:   "success",
@@ -999,7 +1038,10 @@ func runPromptServer(ctx context.Context) {
 			}
 
 			writeJSON("/ipc/output/result.json", result)
-			_ = os.WriteFile("/ipc/done", []byte("done"), 0o644)
+			// VEL-1081-2: do NOT write /ipc/done here. The sidecar is
+			// the authoritative writer (it writes /ipc/done after
+			// orchestrator + save_batch + complete_run). Writing it
+			// here would re-introduce the in-flight-prompt-cancel race.
 
 			if markerBytes, err := json.Marshal(result); err == nil {
 				fmt.Fprintf(os.Stdout, "\n__SYMPOZIUM_RESULT__%s__SYMPOZIUM_END__\n", string(markerBytes))
