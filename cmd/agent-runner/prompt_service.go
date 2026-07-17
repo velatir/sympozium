@@ -120,10 +120,15 @@ func runPromptServiceLoop(deps promptServiceDeps) error {
 				return
 			case <-t.C:
 				if _, err := os.Stat("/ipc/done"); err == nil {
-					select {
-					case doneCh <- struct{}{}:
-					default:
-					}
+					// Block on the send so the outer select reliably observes
+					// doneCh before this goroutine exits. The non-blocking
+					// variant with `default:` races with the outer loop's
+					// poll.C case: if the outer loop is busy in processRequest
+					// when we signal done, the signal is dropped, the outer
+					// loop never sees /ipc/done, and the agent-runner hangs
+					// after the agent loop finishes (defer promptWg.Wait
+					// blocks forever). See VEL-1081 exit-hang investigation.
+					doneCh <- struct{}{}
 					return
 				}
 			}
