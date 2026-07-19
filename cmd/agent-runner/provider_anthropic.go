@@ -77,6 +77,7 @@ func (p *anthropicProvider) Chat(ctx context.Context) (ChatResult, error) {
 		params.Tools = p.tools
 	}
 
+	detailedLog.LogLLM("request", map[string]any{"provider": "anthropic", "model": p.model, "messages_count": len(p.messages), "tools_count": len(p.tools)})
 	msg, err := p.client.Messages.New(ctx, params)
 	if err != nil {
 		var apiErr *anthropic.Error

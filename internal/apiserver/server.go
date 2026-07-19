@@ -61,6 +61,7 @@ type Server struct {
 	log          logr.Logger
 	upgrader     websocket.Upgrader
 	densityCache *controller.DensityCache // optional: set when llmfit DaemonSet is enabled
+	authEnabled  bool                     // set by buildMux; gates pricing writes
 }
 
 // NewServer creates a new API server.
@@ -114,6 +115,10 @@ func (s *Server) Handler(token string) http.Handler { return s.buildMux(nil, tok
 // When frontendFS is non-nil, it serves the SPA for non-API paths.
 // When token is non-empty, API routes require Bearer authentication.
 func (s *Server) buildMux(frontendFS fs.FS, token string) http.Handler {
+	// Some cluster-wide mutating routes (pricing) refuse writes outright when
+	// the server runs unauthenticated, instead of inheriting the open-API mode.
+	s.authEnabled = token != ""
+
 	mux := http.NewServeMux()
 
 	// Instance endpoints
@@ -208,6 +213,12 @@ func (s *Server) buildMux(frontendFS fs.FS, token string) http.Handler {
 	// System canary endpoints
 	mux.HandleFunc("GET /api/v1/canary", s.getCanaryConfig)
 	mux.HandleFunc("PATCH /api/v1/canary", s.patchCanaryConfig)
+
+	// Model pricing endpoints (cost estimation; distinct from /density/cost,
+	// which is GPU placement cost)
+	mux.HandleFunc("GET /api/v1/pricing", s.getPricing)
+	mux.HandleFunc("PUT /api/v1/pricing/simulated", s.putSimulatedPrices)
+	mux.HandleFunc("DELETE /api/v1/pricing/simulated", s.deleteSimulatedPrices)
 
 	// Provider discovery endpoints (model listing, node discovery)
 	mux.HandleFunc("GET /api/v1/providers/nodes", s.listProviderNodes)
@@ -809,7 +820,16 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(list.Items, func(i, j int) bool {
 		return list.Items[i].Name < list.Items[j].Name
 	})
-	writeJSON(w, list.Items)
+
+	simTable := s.simulatedTable(r.Context())
+	out := make([]runWithCostOverlay, len(list.Items))
+	for i := range list.Items {
+		out[i] = runWithCostOverlay{
+			AgentRun:              list.Items[i],
+			SimulatedCostEstimate: overlaySimulatedCost(simTable, &list.Items[i]),
+		}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
@@ -825,7 +845,10 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, run)
+	writeJSON(w, runWithCostOverlay{
+		AgentRun:              run,
+		SimulatedCostEstimate: overlaySimulatedCost(s.simulatedTable(r.Context()), &run),
+	})
 }
 
 // CreateRunRequest is the request body for creating a new AgentRun.
@@ -2131,14 +2154,8 @@ func (s *Server) triggerStimulus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve stimulus target from relationships.
-	var targetPersona string
-	for _, rel := range ensemble.Spec.Relationships {
-		if rel.Type == "stimulus" {
-			targetPersona = rel.Target
-			break
-		}
-	}
-	if targetPersona == "" {
+	targetPersona, err := controller.ResolveStimulusTarget(&ensemble)
+	if err != nil {
 		http.Error(w, "no stimulus relationship found", http.StatusBadRequest)
 		return
 	}
@@ -2152,57 +2169,25 @@ func (s *Server) triggerStimulus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve auth and model from the target instance.
-	authSecret := ""
-	provider := "openai"
-	if len(targetInst.Spec.AuthRefs) > 0 {
-		authSecret = targetInst.Spec.AuthRefs[0].Secret
-		if targetInst.Spec.AuthRefs[0].Provider != "" {
-			provider = targetInst.Spec.AuthRefs[0].Provider
-		}
-	}
-
-	// Create the AgentRun.
-	runName := fmt.Sprintf("%s-stimulus-%d", targetAgentName, time.Now().UnixMilli()%100000)
-	agentRun := &sympoziumv1alpha1.AgentRun{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      runName,
-			Namespace: ns,
-			Labels: map[string]string{
-				"sympozium.ai/instance":       targetAgentName,
-				"sympozium.ai/ensemble":       name,
-				"sympozium.ai/stimulus":       "true",
-				"sympozium.ai/trigger-source": "manual",
-			},
-		},
-		Spec: sympoziumv1alpha1.AgentRunSpec{
-			AgentRef: targetAgentName,
-			Task:     ensemble.Spec.Stimulus.Prompt,
-			AgentID:  fmt.Sprintf("stimulus-%s", ensemble.Spec.Stimulus.Name),
-			Model: sympoziumv1alpha1.ModelSpec{
-				Provider:                 provider,
-				Model:                    targetInst.Spec.Agents.Default.Model,
-				BaseURL:                  targetInst.Spec.Agents.Default.BaseURL,
-				AuthSecretRef:            authSecret,
-				ProviderHeaders:          targetInst.Spec.Agents.Default.ProviderHeaders,
-				ProviderHeadersSecretRef: targetInst.Spec.Agents.Default.ProviderHeadersSecretRef,
-			},
-			Skills:           targetInst.Spec.Skills,
-			ImagePullSecrets: targetInst.Spec.ImagePullSecrets,
-			Volumes:          targetInst.Spec.Volumes,
-			VolumeMounts:     targetInst.Spec.VolumeMounts,
-			Env:              targetInst.Spec.Agents.Default.Env,
-			Timeout:          targetInst.Spec.Agents.Default.ParseRunTimeout(),
-		},
-	}
+	// Same builder the controller's readiness path uses, so a manual trigger
+	// produces an identical run — including the agent config's ToolPolicy.
+	agentRun := controller.BuildStimulusRun(
+		r.Context(), s.client, &ensemble, &targetInst, targetPersona,
+		controller.StimulusTriggerSourceManual, time.Now(),
+	)
+	runName := agentRun.Name
 
 	if err := s.client.Create(r.Context(), agentRun); err != nil {
 		http.Error(w, "failed to create stimulus run: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Update ensemble status.
+	// Update ensemble status. Marking the stimulus delivered matters for a
+	// manual trigger fired before the ensemble finished coming up: without it
+	// the controller still sees an undelivered stimulus, hits the readiness
+	// edge moments later, and fires a second run for work already in flight.
 	ensemble.Status.StimulusGeneration++
+	ensemble.Status.StimulusDelivered = true
 	if err := s.client.Status().Update(r.Context(), &ensemble); err != nil {
 		s.log.Error(err, "Failed to update ensemble stimulus generation", "ensemble", name)
 	}
@@ -2215,7 +2200,7 @@ func (s *Server) triggerStimulus(w http.ResponseWriter, r *http.Request) {
 			Metadata: map[string]string{
 				"ensemble":      name,
 				"target":        targetPersona,
-				"triggerSource": "manual",
+				"triggerSource": controller.StimulusTriggerSourceManual,
 				"runName":       runName,
 			},
 		})

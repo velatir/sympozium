@@ -108,6 +108,7 @@ func (p *bedrockProvider) Chat(ctx context.Context) (ChatResult, error) {
 		defer cancel()
 	}
 
+	detailedLog.LogLLM("request", map[string]any{"provider": "bedrock", "model": p.model, "system_len": len(p.system), "messages_count": len(p.messages), "tools_count": len(p.tools)})
 	output, err := p.client.Converse(converseCtx, input)
 	if err != nil {
 		var apiErr smithy.APIError

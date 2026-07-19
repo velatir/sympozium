@@ -105,6 +105,7 @@ func (p *openaiProvider) Chat(ctx context.Context) (ChatResult, error) {
 		params.Tools = p.tools
 	}
 
+	detailedLog.LogLLM("request", map[string]any{"provider": p.provider, "model": p.model, "messages_count": len(p.messages), "tools_count": len(p.tools)})
 	completion, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
 		var apiErr *openai.Error

@@ -34,6 +34,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Plus,
   Settings,
   Save,
@@ -1228,6 +1235,33 @@ function BuilderCanvas({
                 placeholder="The prompt sent to the target agent when all agents are serving..."
                 className="text-sm min-h-[120px]"
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Trigger</Label>
+              <Select
+                value={stimulus.trigger ?? "onReady"}
+                onValueChange={(v) =>
+                  updateStimulus({
+                    ...stimulus,
+                    trigger: v as "onReady" | "manual",
+                  })
+                }
+              >
+                <SelectTrigger className="h-8 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="onReady">
+                    Automatic — on readiness
+                  </SelectItem>
+                  <SelectItem value="manual">Manual — on trigger</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground">
+                {(stimulus.trigger ?? "onReady") === "manual"
+                  ? "The ensemble comes up and waits. Nothing runs until you press Trigger Stimulus."
+                  : "The first cycle starts by itself as soon as every agent is ready — enabling the ensemble is the only confirmation. Choose Manual if a cycle costs money or reaches the network."}
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">

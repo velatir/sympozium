@@ -17,6 +17,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/sympozium-ai/sympozium/internal/ipc"
+	"github.com/sympozium-ai/sympozium/internal/llmprovider"
 )
 
 // maxToolIterations is the maximum number of LLM reasoning rounds before
@@ -67,11 +68,7 @@ func init() {
 // isLocalProvider returns true for providers that run inference locally
 // (single-GPU, request queuing) where per-request timeouts matter.
 func isLocalProvider(provider string) bool {
-	switch provider {
-	case "ollama", "lm-studio", "llama-server", "unsloth", "vllm", "llamacpp", "local":
-		return true
-	}
-	return false
+	return llmprovider.IsLocal(provider)
 }
 
 // effectiveMaxRetries returns the retry count for the given provider.
@@ -103,6 +100,19 @@ func effectiveRunTimeout(provider string) time.Duration {
 	}
 	if isLocalProvider(provider) {
 		return 30 * time.Minute
+	}
+	return 10 * time.Minute
+}
+
+// delegateWaitBudget bounds how long delegate_to_persona and spawn_subagents
+// block on a child's IPC result. The per-edge deadline lives in the Ensemble's
+// relationships[].timeout and is enforced by the SpawnRouter, which unblocks the
+// tool early with an error result. This is only the backstop that stops a tool
+// call outliving the run itself, for when the router never answers. The
+// 10-minute fallback applies to a context with no deadline (tests).
+func delegateWaitBudget(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		return time.Until(deadline).Round(time.Second)
 	}
 	return 10 * time.Minute
 }
@@ -152,6 +162,20 @@ func main() {
 		os.Exit(0)
 	}
 
+	if p := os.Getenv("DETAILED_LOG_PATH"); p != "" {
+		maxSize, err := parseSize(os.Getenv("DETAILED_LOG_MAX_SIZE"), 50*1024*1024)
+		if err != nil {
+			log.Printf("WARNING: invalid DETAILED_LOG_MAX_SIZE: %v — using default 50MB", err)
+		}
+		dl, err := NewDetailedLogger(p, os.Getenv("AGENT_RUN_ID"), maxSize)
+		if err != nil {
+			log.Printf("WARNING: detailed logging disabled: %v", err)
+		} else {
+			detailedLog = dl
+			defer dl.Close()
+		}
+	}
+
 	task := getEnv("TASK", "")
 	if task == "" {
 		if b, err := os.ReadFile("/ipc/input/task.json"); err == nil {
@@ -176,6 +200,7 @@ func main() {
 		// minutes before writing results, but dry run exits in microseconds.
 		time.Sleep(3 * time.Second)
 		persona := getEnv("INSTANCE_NAME", "unknown")
+		detailedLog.LogAgent("dry_run", map[string]any{"task": task, "persona": persona})
 		res := agentResult{
 			Status:   "success",
 			Response: fmt.Sprintf("DRY RUN: [%s] would execute task: %s", persona, truncate(task, 300)),
@@ -361,6 +386,7 @@ func main() {
 		attribute.String("task.summary", truncate(task, 200)),
 	)
 	writeTraceContextMetadata(ctx)
+	detailedLog.LogAgent("span_start", map[string]any{"task": task})
 	logWithTrace(ctx, "info", "agent run started", map[string]any{
 		"instance":  getEnv("INSTANCE_NAME", ""),
 		"namespace": getEnv("AGENT_NAMESPACE", ""),
@@ -446,40 +472,10 @@ func main() {
 	}
 
 	// Apply tool policy: allow/deny lists filter the assembled tool set.
-	// - allow only: all tools not in the allow list are denied (allowlist mode)
-	// - deny only: tools in the deny list are removed (blocklist mode)
-	// - both: allow takes precedence — only allowed tools pass, denied are also removed (least privilege)
 	allowList := os.Getenv("TOOL_POLICY_ALLOW")
 	denyList := os.Getenv("TOOL_POLICY_DENY")
 	if allowList != "" || denyList != "" {
-		allowed := make(map[string]bool)
-		for _, name := range strings.Split(allowList, ",") {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				allowed[name] = true
-			}
-		}
-		denied := make(map[string]bool)
-		for _, name := range strings.Split(denyList, ",") {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				denied[name] = true
-			}
-		}
-		useAllowlist := len(allowed) > 0
-		filtered := tools[:0]
-		for _, t := range tools {
-			if denied[t.Name] {
-				log.Printf("tool policy: denied tool %q", t.Name)
-				continue
-			}
-			if useAllowlist && !allowed[t.Name] {
-				log.Printf("tool policy: tool %q not in allow list", t.Name)
-				continue
-			}
-			filtered = append(filtered, t)
-		}
-		tools = filtered
+		tools = applyToolPolicy(tools, allowList, denyList)
 	}
 
 	apiKey := firstNonEmpty(
@@ -492,6 +488,7 @@ func main() {
 
 	log.Printf("provider=%s model=%s baseURL=%s tools=%v task=%q",
 		provider, modelName, baseURL, toolsEnabled, truncate(task, 80))
+	detailedLog.LogAgent("config", map[string]any{"provider": provider, "model": modelName, "base_url": baseURL, "tools_enabled": toolsEnabled, "task": task})
 	reqTimeout := effectiveRequestTimeout(provider)
 	retries := effectiveMaxRetries(provider)
 	if reqTimeout > 0 {
@@ -683,6 +680,41 @@ func readSkipMarker(path string) (string, bool) {
 		reason = "preRun hook requested skip"
 	}
 	return reason, true
+}
+
+// applyToolPolicy filters tools based on allow/deny lists.
+// - deny only: tools in the deny list are removed (blocklist mode)
+// - allow only: all tools not in the allow list are denied (allowlist mode)
+// - both: deny wins on conflict — a tool in both lists is denied (least privilege)
+func applyToolPolicy(tools []ToolDef, allowList, denyList string) []ToolDef {
+	allowed := make(map[string]bool)
+	for _, name := range strings.Split(allowList, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			allowed[name] = true
+		}
+	}
+	denied := make(map[string]bool)
+	for _, name := range strings.Split(denyList, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			denied[name] = true
+		}
+	}
+	useAllowlist := len(allowed) > 0
+	filtered := make([]ToolDef, 0, len(tools))
+	for _, t := range tools {
+		if denied[t.Name] {
+			log.Printf("tool policy: denied tool %q", t.Name)
+			continue
+		}
+		if useAllowlist && !allowed[t.Name] {
+			log.Printf("tool policy: tool %q not in allow list", t.Name)
+			continue
+		}
+		filtered = append(filtered, t)
+	}
+	return filtered
 }
 
 func firstNonEmpty(vals ...string) string {

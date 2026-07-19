@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -329,6 +331,18 @@ type AgentConfigSchedule struct {
 
 	// Task is the task description sent to the agent on each trigger.
 	Task string `json:"task"`
+
+	// FirstTick controls whether a newly created schedule runs straight away.
+	// "immediate" (default): the first tick is treated as already due, so the
+	// agent runs as soon as the ensemble is enabled.
+	// "afterInterval": wait a full interval before the first run. Use this when
+	// the agent has nothing to do until something else has happened — a
+	// heartbeat that fires at t=0 wakes up to an empty inbox, and when a
+	// stimulus targets the same agent the two collide and do the work twice.
+	// +kubebuilder:validation:Enum=immediate;afterInterval
+	// +kubebuilder:default="immediate"
+	// +optional
+	FirstTick string `json:"firstTick,omitempty"`
 }
 
 // AgentConfigMemory defines initial memory configuration for an agent configuration.
@@ -384,7 +398,34 @@ type StimulusSpec struct {
 
 	// Prompt is the task text injected into the target agent's AgentRun.
 	Prompt string `json:"prompt"`
+
+	// Trigger controls when the stimulus fires.
+	// "onReady" (default): fire automatically as soon as every agent in the
+	// ensemble reports ready. Enabling the ensemble is then the only consent
+	// step — the first run starts on its own.
+	// "manual": never fire automatically. The ensemble reaches Ready and waits;
+	// the run is created only by POST /api/v1/ensembles/{name}/stimulus/trigger.
+	// Use this when a cycle costs real money or reaches the network, and a human
+	// should choose the moment it starts.
+	// +kubebuilder:validation:Enum=onReady;manual
+	// +kubebuilder:default="onReady"
+	// +optional
+	Trigger string `json:"trigger,omitempty"`
 }
+
+// FiresOnReady reports whether the stimulus should be delivered automatically
+// once the ensemble's agents are ready. An empty Trigger means "onReady" so
+// ensembles written before the field existed keep their behaviour.
+func (s *StimulusSpec) FiresOnReady() bool {
+	return s.Trigger == "" || s.Trigger == StimulusTriggerOnReady
+}
+
+const (
+	// StimulusTriggerOnReady fires the stimulus on the readiness edge.
+	StimulusTriggerOnReady = "onReady"
+	// StimulusTriggerManual fires the stimulus only via the trigger API.
+	StimulusTriggerManual = "manual"
+)
 
 // AgentConfigRelationship defines a directed edge between two agent configurations in an ensemble.
 type AgentConfigRelationship struct {
@@ -415,6 +456,23 @@ type AgentConfigRelationship struct {
 	// ResultFormat constrains the expected output (e.g. "json", "markdown").
 	// +optional
 	ResultFormat string `json:"resultFormat,omitempty"`
+}
+
+// ParseTimeout returns the edge's Timeout as a duration, or nil when it is
+// unset, malformed, or non-positive. Callers fall back to their own default
+// rather than treating a bad value as zero, which would expire the edge
+// immediately. On a delegation edge the SpawnRouter enforces this as the
+// deadline for the child run; on a sequential edge it is persisted onto the
+// successor's AgentRunSpec.Timeout.
+func (r AgentConfigRelationship) ParseTimeout() *metav1.Duration {
+	if r.Timeout == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(r.Timeout)
+	if err != nil || d <= 0 {
+		return nil
+	}
+	return &metav1.Duration{Duration: d}
 }
 
 // InstalledAgentConfig tracks the resources created for one persona.

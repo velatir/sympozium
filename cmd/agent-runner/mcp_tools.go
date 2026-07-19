@@ -203,7 +203,7 @@ func executeMCPTool(ctx context.Context, tool mcpToolEntry, argsJSON string) str
 			_ = os.Remove(reqPath)
 			_ = os.Remove(resPath)
 
-			return formatMCPResult(result)
+			return formatMCPResult(result, tool.Name)
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -212,27 +212,30 @@ func executeMCPTool(ctx context.Context, tool mcpToolEntry, argsJSON string) str
 }
 
 // formatMCPResult converts an MCP result to a string for the LLM.
-func formatMCPResult(r mcpResult) string {
+func formatMCPResult(r mcpResult, toolName string) string {
 	if !r.Success || r.IsError {
+		var errMsg string
 		if r.Error != "" {
-			return fmt.Sprintf("MCP Error: %s", r.Error)
-		}
-		// Try to extract error text from content
-		var content []mcpContent
-		if json.Unmarshal(r.Content, &content) == nil {
-			for _, c := range content {
-				if c.Text != "" {
-					return fmt.Sprintf("MCP Error: %s", c.Text)
+			errMsg = fmt.Sprintf("MCP Error: %s", r.Error)
+		} else {
+			var content []mcpContent
+			if json.Unmarshal(r.Content, &content) == nil {
+				for _, c := range content {
+					if c.Text != "" {
+						errMsg = fmt.Sprintf("MCP Error: %s", c.Text)
+						break
+					}
 				}
 			}
+			if errMsg == "" {
+				errMsg = "MCP Error: unknown error"
+			}
 		}
-		return "MCP Error: unknown error"
+		return errMsg
 	}
 
-	// Extract text from content blocks
 	var content []mcpContent
 	if err := json.Unmarshal(r.Content, &content); err != nil {
-		// If content is not an array of content blocks, return raw
 		return string(r.Content)
 	}
 
