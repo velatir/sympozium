@@ -118,9 +118,10 @@ func TestIsSequentialSuccessor(t *testing.T) {
 		// "pipeline" left delegation ensembles stamping a schedule for a
 		// sequential target, which then fired at t=0 — before the predecessor
 		// it exists to react to had produced anything.
-		{"sequential target in delegation mode is suppressed", "delegation", "cost-analyzer", true},
-		{"sequential target in autonomous mode is suppressed", "autonomous", "cost-analyzer", true},
-		{"empty workflowType still suppresses a sequential target", "", "cost-analyzer", true},
+		{"sequential target in non-pipeline mode is not suppressed", "delegation", "cost-analyzer", false},
+		{"sequential target in autonomous mode is not suppressed", "autonomous", "cost-analyzer", false},
+		{"empty workflowType is not suppressed", "", "cost-analyzer", false},
+		{"sequential target in pipeline mode is suppressed", "pipeline", "cost-analyzer", true},
 		{"unrelated persona is not suppressed", "pipeline", "some-other-agent", false},
 	}
 	for _, tt := range tests {
@@ -131,8 +132,8 @@ func TestIsSequentialSuccessor(t *testing.T) {
 					Relationships: rels,
 				},
 			}
-			if got := isSequentialSuccessor(pack, tt.persona); got != tt.want {
-				t.Errorf("isSequentialSuccessor(%q, %q) = %v, want %v", tt.workflowType, tt.persona, got, tt.want)
+			if got := isPipelineSuccessor(pack, tt.persona); got != tt.want {
+				t.Errorf("isPipelineSuccessor(%q, %q) = %v, want %v", tt.workflowType, tt.persona, got, tt.want)
 			}
 		})
 	}

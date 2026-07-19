@@ -30,7 +30,7 @@ func newTestRun() *sympoziumv1alpha1.AgentRun {
 			AgentRef:   "my-instance",
 			AgentID:    "default",
 			SessionKey: "sess-1",
-			Task:       "do stuff",
+			Task:       sympoziumv1alpha1.NewStringTask("do stuff"),
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider:      "openai",
 				Model:         "gpt-4o",
