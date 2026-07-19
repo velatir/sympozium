@@ -1542,7 +1542,7 @@ func (r *EnsembleReconciler) deliverStimulus(ctx context.Context, log logr.Logge
 		},
 		Spec: sympoziumv1alpha1.AgentRunSpec{
 			AgentRef: targetAgentName,
-			Task:     pack.Spec.Stimulus.Prompt,
+			Task:     sympoziumv1alpha1.NewStringTask(pack.Spec.Stimulus.Prompt),
 			AgentID:  fmt.Sprintf("stimulus-%s", pack.Spec.Stimulus.Name),
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider:                 resolveProvider(&targetInst),

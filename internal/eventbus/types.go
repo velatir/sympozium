@@ -61,6 +61,15 @@ const (
 	TopicScheduleUpsert       = "schedule.upsert"
 	TopicStimulusDelivered    = "ensemble.stimulus.delivered"
 
+	// Sidecar-initiated LLM prompting. The sidecar drives the orchestration
+	// loop and asks the agent-runner to issue single LLM calls instead of
+	// the model driving tool calls. TopicPromptRequest is the bridge-relayed
+	// request from the sidecar to the agent-runner; TopicPromptResult is
+	// the agent-runner's reply back through the bridge.
+	// Per-run: agent.prompt.result.{runID}.
+	TopicPromptRequest = "agent.prompt.request"
+	TopicPromptResult  = "agent.prompt.result"
+
 	// Density telemetry (from llmfit DaemonSet via FitnessCache)
 	TopicDensityUpdated     = "density.updated"           // per-node fitness snapshot
 	TopicDensityNodeStale   = "density.node.stale"        // node stopped reporting

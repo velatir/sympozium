@@ -61,6 +61,7 @@ type Server struct {
 	log          logr.Logger
 	upgrader     websocket.Upgrader
 	densityCache *controller.DensityCache // optional: set when llmfit DaemonSet is enabled
+	authEnabled  bool                     // true when the bearer-token auth middleware is active (token != "")
 }
 
 // NewServer creates a new API server.
@@ -90,7 +91,8 @@ func (s *Server) Start(addr, token string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	s.log.Info("Starting API server", "addr", addr, "auth", token != "")
+	s.authEnabled = token != ""
+	s.log.Info("Starting API server", "addr", addr, "auth", s.authEnabled)
 	return server.ListenAndServe()
 }
 
@@ -103,7 +105,8 @@ func (s *Server) StartWithUI(addr, token string, frontendFS fs.FS) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	s.log.Info("Starting API server with UI", "addr", addr)
+	s.authEnabled = token != ""
+	s.log.Info("Starting API server with UI", "addr", addr, "auth", s.authEnabled)
 	return server.ListenAndServe()
 }
 
@@ -923,7 +926,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 			AgentRef:   req.AgentRef,
 			AgentID:    req.AgentID,
 			SessionKey: req.SessionKey,
-			Task:       req.Task,
+			Task:       sympoziumv1alpha1.NewStringTask(req.Task),
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider:                 provider,
 				Model:                    model,
@@ -2177,7 +2180,7 @@ func (s *Server) triggerStimulus(w http.ResponseWriter, r *http.Request) {
 		},
 		Spec: sympoziumv1alpha1.AgentRunSpec{
 			AgentRef: targetAgentName,
-			Task:     ensemble.Spec.Stimulus.Prompt,
+			Task:     sympoziumv1alpha1.NewStringTask(ensemble.Spec.Stimulus.Prompt),
 			AgentID:  fmt.Sprintf("stimulus-%s", ensemble.Spec.Stimulus.Name),
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider:                 provider,

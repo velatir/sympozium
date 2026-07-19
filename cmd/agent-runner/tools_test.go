@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,5 +110,143 @@ func TestExecuteCommandToolDefAdvertisesTarget(t *testing.T) {
 		if r == "target" {
 			t.Fatalf("'target' must be optional, but appears in required: %v", required)
 		}
+	}
+}
+
+// writeReadFileFixture creates a file under /tmp — the only allowlisted
+// read_file prefix that is writable on a dev machine (t.TempDir() lands in
+// /var/folders on macOS, which the allowlist rejects).
+func writeReadFileFixture(t *testing.T, content string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "readfiletool")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
+}
+
+// tenLines returns "l1\n" through "l10\n".
+func tenLines() string {
+	var b strings.Builder
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&b, "l%d\n", i)
+	}
+	return b.String()
+}
+
+func TestReadFileTool_Default(t *testing.T) {
+	content := "hello\nworld\n"
+	path := writeReadFileFixture(t, content)
+
+	got := readFileTool(map[string]any{"path": path})
+	if got != content {
+		t.Fatalf("default read = %q, want %q", got, content)
+	}
+}
+
+func TestReadFileTool_RangedReads(t *testing.T) {
+	path := writeReadFileFixture(t, tenLines())
+
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"offset and limit", map[string]any{"path": path, "offset": float64(4), "limit": float64(3)},
+			"l4\nl5\nl6\n... (showing lines 4-6 of 10; continue with offset=7)"},
+		{"offset only reads to EOF", map[string]any{"path": path, "offset": float64(8)},
+			"l8\nl9\nl10"},
+		{"limit only", map[string]any{"path": path, "limit": float64(2)},
+			"l1\nl2\n... (showing lines 1-2 of 10; continue with offset=3)"},
+		{"offset past EOF", map[string]any{"path": path, "offset": float64(11)},
+			"Error: offset 11 is past the end of the file (10 lines)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := readFileTool(c.args)
+			if got != c.want {
+				t.Fatalf("readFileTool(%v) = %q, want %q", c.args, got, c.want)
+			}
+		})
+	}
+}
+
+func TestReadFileTool_CapTruncatesAtLineBoundary(t *testing.T) {
+	// 500 lines of 40 chars (41 bytes with newline) — well past the 8000-byte cap.
+	var b strings.Builder
+	for i := 1; i <= 500; i++ {
+		fmt.Fprintf(&b, "%04d%s\n", i, strings.Repeat("x", 36))
+	}
+	path := writeReadFileFixture(t, b.String())
+
+	got := readFileTool(map[string]any{"path": path})
+	hint := "\n... (truncated at line 195 of 500; continue with offset=196)"
+	if !strings.HasSuffix(got, hint) {
+		t.Fatalf("truncated read missing continuation hint %q, got tail %q", hint, got[len(got)-80:])
+	}
+	body := strings.TrimSuffix(got, hint)
+	if len(body) > 8_000 {
+		t.Fatalf("truncated body is %d bytes, want <= 8000", len(body))
+	}
+	if !strings.HasSuffix(body, "0195"+strings.Repeat("x", 36)) {
+		t.Fatalf("body does not end at a complete line, tail = %q", body[len(body)-50:])
+	}
+
+	// Following the hint resumes exactly where the first read stopped.
+	next := readFileTool(map[string]any{"path": path, "offset": float64(196)})
+	if !strings.HasPrefix(next, "0196"+strings.Repeat("x", 36)) {
+		t.Fatalf("continuation read starts with %q, want line 196", next[:40])
+	}
+}
+
+func TestReadFileTool_SingleLineOverCap(t *testing.T) {
+	path := writeReadFileFixture(t, strings.Repeat("y", 9_000))
+
+	got := readFileTool(map[string]any{"path": path})
+	want := strings.Repeat("y", 8_000) + "\n... (truncated mid-line 1 of 1; line exceeds the 8000-byte cap)"
+	if got != want {
+		t.Fatalf("over-cap single line read tail = %q, want mid-line truncation message", got[len(got)-80:])
+	}
+}
+
+func TestReadFileTool_AccessDenied(t *testing.T) {
+	got := readFileTool(map[string]any{"path": "/etc/passwd"})
+	if !strings.Contains(got, "access denied") {
+		t.Fatalf("read outside allowlist = %q, want access denied error", got)
+	}
+}
+
+// TestReadFileToolDefAdvertisesRange asserts the read_file schema exposes the
+// optional offset/limit parameters and that 'path' remains the only required
+// field.
+func TestReadFileToolDefAdvertisesRange(t *testing.T) {
+	var def *ToolDef
+	for i := range defaultTools() {
+		td := defaultTools()[i]
+		if td.Name == ToolReadFile {
+			def = &td
+			break
+		}
+	}
+	if def == nil {
+		t.Fatalf("read_file tool not found in defaultTools()")
+	}
+	props, ok := def.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties missing or wrong type in read_file schema")
+	}
+	for _, p := range []string{"offset", "limit"} {
+		if _, ok := props[p]; !ok {
+			t.Fatalf("read_file schema is missing the optional %q property: %v", p, props)
+		}
+	}
+	required, _ := def.Parameters["required"].([]string)
+	if len(required) != 1 || required[0] != "path" {
+		t.Fatalf("read_file required = %v, want [path]", required)
 	}
 }

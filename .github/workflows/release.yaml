@@ -15,7 +15,7 @@ permissions:
   actions: write
 
 env:
-  REGISTRY: ghcr.io/velatir/sympozium
+  REGISTRY: ghcr.io/sympozium-ai/sympozium
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
@@ -121,8 +121,8 @@ jobs:
           build-args: |
             IMAGE_TAG=${{ env.RELEASE_TAG }}
           tags: ${{ steps.tags.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
   # ── Sync Helm chart with release ──────────────────────────────────────────────
   release-helm-chart:

@@ -101,6 +101,33 @@ A **Stimulus** is a lightweight configuration node that automatically injects a 
 4. If the ensemble is disabled and re-enabled, the stimulus fires again on the next full-readiness transition.
 5. The stimulus can also be manually re-triggered via the UI button or API.
 
+### Choosing When It Fires
+
+`stimulus.trigger` decides whether step 3 happens on its own:
+
+| Value | Behaviour |
+|---|---|
+| `onReady` (default) | Fires automatically on the readiness edge. Enabling the ensemble is the only consent step — the first cycle starts by itself. |
+| `manual` | Never fires automatically. The ensemble reaches Ready and waits for the trigger API. |
+
+Prefer `manual` when a cycle costs real money, reaches the network, or writes
+somewhere durable, and a human should choose the moment it starts:
+
+```yaml
+  stimulus:
+    name: kickoff
+    trigger: manual
+    prompt: "Begin the daily research workflow."
+```
+
+Note that a stimulus and an agent config's `schedule` both land on their target
+the moment an ensemble is enabled — the stimulus on the readiness edge, the
+schedule via its backdated first tick. When both point at the same agent, that
+agent receives the same work twice. Set `schedule.firstTick: afterInterval` on
+the target so its heartbeat waits a full interval instead of racing the
+stimulus. (The controller also skips a scheduled tick while a stimulus run for
+that agent is still active, but leaning on `firstTick` states the intent.)
+
 ### Example
 
 ```yaml
@@ -427,6 +454,10 @@ spec:
       schedule:
         type: heartbeat
         interval: "1h"
+        # A new schedule backdates its first tick and runs the moment the
+        # ensemble is enabled. Use afterInterval to wait a full interval
+        # instead — the planner has nothing to delegate at t=0 anyway.
+        firstTick: afterInterval
         task: "Check for pending work and delegate to the executor."
     - name: executor
       displayName: "Executor"

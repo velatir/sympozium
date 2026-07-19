@@ -30,7 +30,7 @@ func newTestRun() *sympoziumv1alpha1.AgentRun {
 			AgentRef:   "my-instance",
 			AgentID:    "default",
 			SessionKey: "sess-1",
-			Task:       "do stuff",
+			Task:       sympoziumv1alpha1.NewStringTask("do stuff"),
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider:      "openai",
 				Model:         "gpt-4o",
@@ -648,6 +648,57 @@ func TestParseAgentResultFromLogs_SkippedDefaultReason(t *testing.T) {
 	}
 	if result == "" {
 		t.Fatal("expected a default skip reason, got empty")
+	}
+}
+
+func TestParseAgentResultFromLogs_NegativeMetricsRejected(t *testing.T) {
+	// An adversarial agent printing negative counts must not produce usage at
+	// all: a negative total would decrement Ensemble.status.tokenBudgetUsed
+	// and defeat halt-mode budgets.
+	logs := "__SYMPOZIUM_RESULT__" +
+		`{"status":"success","response":"done","metrics":{"durationMs":10,"inputTokens":-5000000000,"outputTokens":1,"toolCalls":1}}` +
+		"__SYMPOZIUM_END__\n"
+
+	result, errMsg, usage, skipped := parseAgentResultFromLogs(logs, logr.Discard())
+	if skipped || errMsg != "" {
+		t.Fatalf("unexpected skip/error: skipped=%v errMsg=%q", skipped, errMsg)
+	}
+	if result != "done" {
+		t.Fatalf("result = %q, want %q (response must survive metric rejection)", result, "done")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage for negative metrics, got %+v", usage)
+	}
+}
+
+func TestParseAgentResultFromLogs_NegativeToolCallsRejected(t *testing.T) {
+	logs := "__SYMPOZIUM_RESULT__" +
+		`{"status":"success","response":"done","metrics":{"durationMs":10,"inputTokens":5,"outputTokens":5,"toolCalls":-1}}` +
+		"__SYMPOZIUM_END__\n"
+
+	_, _, usage, _ := parseAgentResultFromLogs(logs, logr.Discard())
+	if usage != nil {
+		t.Fatalf("expected nil usage when any metric is negative, got %+v", usage)
+	}
+}
+
+func TestParseAgentResultFromLogs_OversizedMetricsClamped(t *testing.T) {
+	logs := "__SYMPOZIUM_RESULT__" +
+		`{"status":"success","response":"done","metrics":{"durationMs":10,"inputTokens":90000000000,"outputTokens":20,"toolCalls":3}}` +
+		"__SYMPOZIUM_END__\n"
+
+	_, errMsg, usage, _ := parseAgentResultFromLogs(logs, logr.Discard())
+	if errMsg != "" {
+		t.Fatalf("unexpected error: %s", errMsg)
+	}
+	if usage == nil {
+		t.Fatal("expected usage, got nil")
+	}
+	if usage.InputTokens != maxAgentReportedMetric {
+		t.Fatalf("inputTokens = %d, want clamp at %d", usage.InputTokens, int64(maxAgentReportedMetric))
+	}
+	if usage.TotalTokens != maxAgentReportedMetric+20 {
+		t.Fatalf("totalTokens = %d, want %d", usage.TotalTokens, int64(maxAgentReportedMetric)+20)
 	}
 }
 
@@ -1848,24 +1899,54 @@ func TestBuildHandoffTask_NoTargetTask(t *testing.T) {
 	}
 }
 
-func TestBuildHandoffTask_TruncatesResult(t *testing.T) {
-	longResult := strings.Repeat("x", 1000)
-	got := buildHandoffTask("researcher", "task", longResult, "next")
-	if !strings.Contains(got, "...") {
-		t.Error("expected truncation marker in result")
+func TestBuildHandoffTask_PassesResultsUnderTheLimitIntact(t *testing.T) {
+	// A result comfortably under the cap must arrive whole. A report handed to
+	// a reviewer is the payload of the whole edge; clipping it silently makes
+	// the reviewer critique a fragment.
+	result := strings.Repeat("x", handoffResultMaxChars-1)
+	got := buildHandoffTask("writer", "task", result, "review it")
+	if !strings.Contains(got, result) {
+		t.Error("result under the limit should pass through unmodified")
 	}
-	// Result section should be at most 803 chars (800 + "...")
+	if strings.Contains(got, "[truncated:") {
+		t.Error("result under the limit should not be marked truncated")
+	}
+}
+
+func TestBuildHandoffTask_TruncatesResult(t *testing.T) {
+	longResult := strings.Repeat("x", handoffResultMaxChars+500)
+	got := buildHandoffTask("researcher", "task", longResult, "next")
+
+	// The notice must name the truncation explicitly. A bare "..." is
+	// indistinguishable from an ellipsis, so a successor cannot tell that data
+	// is missing and will act on the fragment as if it were complete.
+	if !strings.Contains(got, "[truncated:") {
+		t.Error("expected an explicit truncation notice in the result")
+	}
+	if !strings.Contains(got, "researcher") {
+		t.Error("truncation notice should name the source persona to ask for the full text")
+	}
+	if !strings.Contains(got, fmt.Sprintf("produced %d characters", handoffResultMaxChars+500)) {
+		t.Error("truncation notice should report the original length, not the clipped one")
+	}
+
 	idx := strings.Index(got, "### Result\n")
 	if idx < 0 {
 		t.Fatal("missing Result section")
 	}
 	resultSection := got[idx+len("### Result\n"):]
-	endIdx := strings.Index(resultSection, "\n\n### ")
-	if endIdx >= 0 {
+	if endIdx := strings.Index(resultSection, "\n\n### "); endIdx >= 0 {
 		resultSection = resultSection[:endIdx]
 	}
-	if len(resultSection) > 803 {
-		t.Errorf("result section too long: %d chars", len(resultSection))
+
+	// Measure the carried payload — the text before the notice — rather than
+	// the whole section, which also contains the notice's own prose.
+	payload := resultSection
+	if n := strings.Index(payload, "\n\n[truncated:"); n >= 0 {
+		payload = payload[:n]
+	}
+	if payload != strings.Repeat("x", handoffResultMaxChars) {
+		t.Errorf("carried payload = %d chars, want exactly %d", len(payload), handoffResultMaxChars)
 	}
 }
 
@@ -2327,6 +2408,48 @@ func TestUpdateTokenBudget(t *testing.T) {
 	}
 	if updated.Status.TokenBudgetUsed != 1500 {
 		t.Errorf("after second call tokenBudgetUsed = %d, want 1500 (no double-count)", updated.Status.TokenBudgetUsed)
+	}
+}
+
+func TestUpdateTokenBudget_NegativeTotalNeverDecrementsLedger(t *testing.T) {
+	// Regression: a TokenUsage with a negative total (e.g. from a forged
+	// result marker on an older controller) must not be added to the ensemble
+	// ledger — the budget only ever counts up.
+	pack := &sympoziumv1alpha1.Ensemble{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-pack", Namespace: "default"},
+		Spec: sympoziumv1alpha1.EnsembleSpec{
+			SharedMemory: &sympoziumv1alpha1.SharedMemorySpec{
+				Enabled: true,
+				Membrane: &sympoziumv1alpha1.MembraneSpec{
+					TokenBudget: &sympoziumv1alpha1.TokenBudgetSpec{
+						MaxTokens: 100000,
+					},
+				},
+			},
+		},
+		Status: sympoziumv1alpha1.EnsembleStatus{
+			TokenBudgetUsed: 1500,
+		},
+	}
+	run := newTestRun()
+	run.Labels = map[string]string{"sympozium.ai/ensemble": "my-pack"}
+	run.Status.TokenUsage = &sympoziumv1alpha1.TokenUsage{
+		InputTokens:  -2000,
+		OutputTokens: 0,
+		TotalTokens:  -2000,
+	}
+
+	r := newMembraneTestReconciler(t, pack, run)
+	if err := r.updateTokenBudget(context.Background(), logr.Discard(), run); err != nil {
+		t.Fatalf("updateTokenBudget: %v", err)
+	}
+
+	var updated sympoziumv1alpha1.Ensemble
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "my-pack", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get ensemble: %v", err)
+	}
+	if updated.Status.TokenBudgetUsed != 1500 {
+		t.Errorf("tokenBudgetUsed = %d, want 1500 (negative usage must not decrement)", updated.Status.TokenBudgetUsed)
 	}
 }
 
