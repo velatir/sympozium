@@ -227,7 +227,7 @@ func TestSympoziumScheduleReconcile_SkipsWhenServingRunExists(t *testing.T) {
 			AgentRef:   "inst-serving",
 			AgentID:    "web-endpoint",
 			SessionKey: "web",
-			Task:       "serve",
+			Task:       sympoziumv1alpha1.NewStringTask("serve"),
 			Mode:       "server",
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider:      "openai",

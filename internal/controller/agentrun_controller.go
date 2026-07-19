@@ -1021,7 +1021,7 @@ func (r *AgentRunReconciler) triggerSequentialSuccessors(ctx context.Context, lo
 				break
 			}
 		}
-		task := buildHandoffTask(sourcePersona, agentRun.Spec.Task, agentRun.Status.Result, targetTask)
+		task := buildHandoffTask(sourcePersona, agentRun.Spec.Task.GetPrompt(), agentRun.Status.Result, targetTask)
 
 		// Create the successor AgentRun.
 		runName := fmt.Sprintf("%s-seq-%d", targetAgentName, time.Now().UnixMilli()%100000)
@@ -1051,7 +1051,7 @@ func (r *AgentRunReconciler) triggerSequentialSuccessors(ctx context.Context, lo
 			},
 			Spec: sympoziumv1alpha1.AgentRunSpec{
 				AgentRef: targetAgentName,
-				Task:     task,
+				Task:     sympoziumv1alpha1.NewStringTask(task),
 				AgentID:  fmt.Sprintf("sequential-from-%s", sourcePersona),
 				Model: sympoziumv1alpha1.ModelSpec{
 					Provider:                 resolveProvider(&targetInst),
@@ -1920,7 +1920,7 @@ func (r *AgentRunReconciler) buildContainers(
 		{Name: "AGENT_RUN_ID", Value: agentRun.Name},
 		{Name: "AGENT_ID", Value: agentRun.Spec.AgentID},
 		{Name: "SESSION_KEY", Value: agentRun.Spec.SessionKey},
-		{Name: "TASK", Value: agentRun.Spec.Task},
+		{Name: "TASK", Value: agentRun.Spec.Task.GetPrompt()},
 		{Name: "SYSTEM_PROMPT", Value: agentRun.Spec.SystemPrompt},
 		{Name: "MODEL_PROVIDER", Value: agentRun.Spec.Model.Provider},
 		{Name: "MODEL_NAME", Value: agentRun.Spec.Model.Model},
@@ -3480,7 +3480,7 @@ func (r *AgentRunReconciler) createInputConfigMap(ctx context.Context, agentRun 
 			},
 		},
 		Data: map[string]string{
-			"task":          agentRun.Spec.Task,
+			"task":          agentRun.Spec.Task.GetPrompt(),
 			"system-prompt": agentRun.Spec.SystemPrompt,
 			"agent-id":      agentRun.Spec.AgentID,
 			"session-key":   agentRun.Spec.SessionKey,
