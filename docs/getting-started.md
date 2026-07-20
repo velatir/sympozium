@@ -234,13 +234,14 @@ back in the TUI.
 
 ### Built-in tools
 
-Every agent pod ships with these seven tools:
+Every agent pod ships with these eight tools:
 
 | Tool | Description |
 |------|-------------|
 | `execute_command` | Run shell commands (kubectl, curl, jq…) in a skill sidecar |
 | `read_file` | Read a file from the pod filesystem |
 | `write_file` | Create or overwrite a file |
+| `edit_file` | Apply one or more exact-string (unique-match) replacements to a file (atomic) |
 | `list_directory` | List directory contents |
 | `send_channel_message` | Send a message to Telegram / Slack / Discord / WhatsApp |
 | `fetch_url` | HTTP GET a URL and return the body |

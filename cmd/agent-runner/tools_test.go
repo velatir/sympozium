@@ -221,6 +221,81 @@ func TestReadFileTool_AccessDenied(t *testing.T) {
 	}
 }
 
+// outsideDir returns a temp dir guaranteed to be outside the tools' allowed
+// roots. t.TempDir() cannot be used for this: on Linux it lands under /tmp,
+// which is allowlisted. The package working directory (the repo checkout) is
+// outside the roots on both CI and dev machines.
+func outsideDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", "outside-roots")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	if underAnyPrefix(abs, resolvePrefixes(readableRoots)) {
+		t.Skipf("working directory %s is inside the allowed roots; cannot test escapes", abs)
+	}
+	return abs
+}
+
+func TestReadFileTool_SymlinkEscapeDenied(t *testing.T) {
+	outside := filepath.Join(outsideDir(t), "secret.txt")
+	if err := os.WriteFile(outside, []byte("s3cret"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	link := filepath.Join(filepath.Dir(writeReadFileFixture(t, "unused")), "link.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	got := readFileTool(map[string]any{"path": link})
+	if !strings.Contains(got, "resolves outside") {
+		t.Fatalf("read through escaping symlink = %q, want denial", got)
+	}
+}
+
+func TestWriteFileTool_PrefixBoundary(t *testing.T) {
+	// "/tmpfoo" must not count as under "/tmp".
+	got := writeFileTool(map[string]any{"path": "/tmpfoo/x.txt", "content": "x"})
+	if !strings.Contains(got, "access denied") {
+		t.Fatalf("write to /tmpfoo = %q, want access denied error", got)
+	}
+}
+
+func TestWriteFileTool_SymlinkEscapeDenied(t *testing.T) {
+	outside := outsideDir(t)
+	link := filepath.Join(filepath.Dir(writeReadFileFixture(t, "unused")), "linkdir")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	got := writeFileTool(map[string]any{"path": filepath.Join(link, "f.txt"), "content": "x"})
+	if !strings.Contains(got, "resolves outside") {
+		t.Fatalf("write through escaping symlink = %q, want denial", got)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "f.txt")); !os.IsNotExist(err) {
+		t.Fatalf("file was created outside the allowed roots (err=%v)", err)
+	}
+}
+
+func TestWriteFileTool_CreatesNestedDirs(t *testing.T) {
+	dir := filepath.Dir(writeReadFileFixture(t, "unused"))
+	path := filepath.Join(dir, "a", "b", "f.txt")
+
+	got := writeFileTool(map[string]any{"path": path, "content": "nested"})
+	if !strings.Contains(got, "Successfully wrote") {
+		t.Fatalf("nested write failed: %q", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "nested" {
+		t.Fatalf("nested file = %q (err=%v), want %q", data, err, "nested")
+	}
+}
+
 // TestReadFileToolDefAdvertisesRange asserts the read_file schema exposes the
 // optional offset/limit parameters and that 'path' remains the only required
 // field.

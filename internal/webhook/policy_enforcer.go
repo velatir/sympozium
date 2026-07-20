@@ -51,6 +51,7 @@ var builtinToolNames = map[string]struct{}{
 	"execute_command":      {},
 	"read_file":            {},
 	"write_file":           {},
+	"edit_file":            {},
 	"list_directory":       {},
 	"send_channel_message": {},
 	"fetch_url":            {},

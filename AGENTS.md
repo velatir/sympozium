@@ -194,13 +194,14 @@ Add new tests to the `test-integration` target in the `Makefile`.
 
 ## Agent Tools
 
-The agent-runner has 7 built-in tools defined in `cmd/agent-runner/tools.go`:
+The agent-runner has 8 built-in tools defined in `cmd/agent-runner/tools.go`:
 
 | Tool | Category | Description |
 |------|----------|-------------|
 | `execute_command` | IPC (sidecar) | Run shell commands in the skill sidecar |
 | `read_file` | Native | Read file contents |
 | `write_file` | Native | Write/create files |
+| `edit_file` | Native | Apply one or more exact-string (unique-match) replacements to a file (atomic, all-or-nothing) |
 | `list_directory` | Native | List directory contents |
 | `send_channel_message` | IPC (bridge) | Send messages to Telegram/Slack/Discord/WhatsApp |
 | `fetch_url` | Native | HTTP GET a URL and return the body |

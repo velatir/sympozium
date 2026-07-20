@@ -36,6 +36,7 @@ Every agent pod has these tools available out of the box (no skill sidecar requi
 | `execute_command` | IPC (sidecar) | Execute shell commands (`kubectl`, `bash`, `curl`, `jq`, etc.) in the skill sidecar container |
 | `read_file` | Native | Read file contents from the pod filesystem |
 | `write_file` | Native | Create or overwrite files under `/workspace` or `/tmp` |
+| `edit_file` | Native | Apply one or more exact-string replacements to a file, sequentially and all-or-nothing (each old_string must match the current contents uniquely) |
 | `list_directory` | Native | List directory contents with type, size, and name |
 | `fetch_url` | Native | Fetch web pages or API endpoints. HTML is converted to readable plain text |
 | `send_channel_message` | IPC (bridge) | Send a message through a connected channel |

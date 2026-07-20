@@ -226,6 +226,53 @@ func defaultTools() []ToolDef {
 			},
 		},
 		{
+			Name: ToolEditFile,
+			Description: "Apply one or more exact-string replacements to an existing file. Prefer this over " +
+				"write_file for targeted changes — it does not rewrite the whole file. " +
+				"Pass an ordered 'edits' array; a single change is just a one-element array. " +
+				"Each 'old_string' must match the current file contents exactly (including whitespace and indentation) " +
+				"and be UNIQUE: if it appears more than once the edit is rejected with the matching line numbers, so " +
+				"include enough surrounding context to pick out the one occurrence you mean, or set 'replace_all' to " +
+				"change every one. Read the file first (e.g. with read_file) if you are unsure of the exact text. " +
+				"Use an empty 'new_string' to delete the matched text. " +
+				"Edits are applied sequentially — each sees the result of the previous ones — and the batch is " +
+				"all-or-nothing: if any edit fails to match (or is ambiguous), the file is left completely unchanged. " +
+				"Paths under /workspace and /tmp are editable.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{
+						"type":        "string",
+						"description": "Absolute path to the file to edit.",
+					},
+					"edits": map[string]any{
+						"type":        "array",
+						"description": "Ordered list of replacements to apply to the file. For a single change, pass a one-element array.",
+						"minItems":    1,
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"old_string": map[string]any{
+									"type":        "string",
+									"description": "The exact text to replace. Must be unique in the working text unless replace_all is set.",
+								},
+								"new_string": map[string]any{
+									"type":        "string",
+									"description": "The replacement text. Use an empty string to delete old_string.",
+								},
+								"replace_all": map[string]any{
+									"type":        "boolean",
+									"description": "Replace every occurrence of this old_string instead of requiring a unique match. Defaults to false.",
+								},
+							},
+							"required": []string{"old_string", "new_string"},
+						},
+					},
+				},
+				"required": []string{"path", "edits"},
+			},
+		},
+		{
 			Name: ToolScheduleTask,
 			Description: "Create, update, or delete a recurring scheduled task. " +
 				"Use this to set up heartbeats, periodic checks, or any repeating work. " +
@@ -359,6 +406,8 @@ func executeToolCall(ctx context.Context, name string, argsJSON string) string {
 		return readFileTool(args)
 	case ToolWriteFile:
 		return writeFileTool(args)
+	case ToolEditFile:
+		return editFileTool(ctx, args)
 	case ToolListDirectory:
 		return listDirectoryTool(args)
 	case ToolSendChannelMessage:
@@ -400,20 +449,14 @@ func readFileTool(args map[string]any) string {
 		return "Error: 'path' is required"
 	}
 
-	// Security: restrict to allowed paths.
-	allowed := []string{"/workspace", "/skills", "/tmp", "/ipc"}
-	ok := false
-	for _, prefix := range allowed {
-		if strings.HasPrefix(filepath.Clean(path), prefix) {
-			ok = true
-			break
-		}
-	}
-	if !ok {
-		return fmt.Sprintf("Error: access denied — path must be under %s", strings.Join(allowed, ", "))
+	// Security: restrict to allowed paths, symlink-resolved so a link under an
+	// allowed root cannot read outside it.
+	clean, err := resolvePath(path, readableRoots)
+	if err != nil {
+		return "Error: " + err.Error()
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(clean)
 	if err != nil {
 		return fmt.Sprintf("Error reading file: %v", err)
 	}
@@ -978,18 +1021,12 @@ func writeFileTool(args map[string]any) string {
 	}
 	content, _ := args["content"].(string)
 
-	// Security: restrict to writable paths.
-	allowed := []string{"/workspace", "/tmp"}
-	clean := filepath.Clean(path)
-	ok := false
-	for _, prefix := range allowed {
-		if strings.HasPrefix(clean, prefix) {
-			ok = true
-			break
-		}
-	}
-	if !ok {
-		return fmt.Sprintf("Error: access denied — path must be under %s", strings.Join(allowed, ", "))
+	// Security: restrict to writable paths, symlink-resolved (via the deepest
+	// existing ancestor) so a link under an allowed root cannot redirect the
+	// write outside it.
+	clean, err := resolveWritableTarget(path)
+	if err != nil {
+		return "Error: " + err.Error()
 	}
 
 	// Ensure parent directory exists.
