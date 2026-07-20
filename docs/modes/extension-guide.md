@@ -13,7 +13,7 @@ the mode shipped today.
 
 | Mode | Doc | Since |
 |------|-----|-------|
-| `sidecar-driven` | [sidecar-driven.md](sidecar-driven.md) | v0.10.x |
+| `sidecar-driven` | [sidecar-driven.md](sidecar-driven.md) | v0.10.44 |
 
 The controller ships `sidecar-driven` by default. External contributions can register more from their own repos without forking sympozium — see [Downstream registration](#downstream-registration).
 

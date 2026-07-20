@@ -1,5 +1,7 @@
 # Writing Tool Sidecars
 
+> **Why this is its own top-level section.** Sidecars are a first-class authoring surface — a sidecar image runs custom code in its own container with its own RBAC, secrets, and lifecycle, closer to "deploy a small service" than "use a platform feature". The two sidecar types — tool-sidecars (this page, agent-driven mode) and [orchestrator sidecars](writing-orchestrator-sidecars.md) (sidecar-driven mode) — share enough surface area that they get their own section rather than living under Concepts or Guides.
+
 This guide explains how to build **tool-sidecar** containers that process tool calls from Sympozium agents in the default agent-driven mode. If you just need to give an agent access to CLI tools like `kubectl` or `helm`, the [Writing Skills](../guides/writing-skills.md) guide covers that. This guide is for when you need **custom logic** — a database client, an API wrapper, a domain-specific computation engine — running in its own container.
 
 > **Building an orchestrator instead?** A sidecar in [sidecar-driven mode](../modes/sidecar-driven.md) drives the workflow and calls the LLM as a sub-call — the IPC is different and `tool-executor.sh` does not apply. See [Writing Orchestrator Sidecars](writing-orchestrator-sidecars.md).

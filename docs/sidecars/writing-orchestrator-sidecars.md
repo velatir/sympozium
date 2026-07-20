@@ -1,5 +1,15 @@
 # Writing Orchestrator Sidecars
 
+!!! warning "Trust model — read this before authoring or installing one"
+    An orchestrator sidecar **fully controls how the AgentRun executes**. It owns the workflow loop, decides when to call the LLM, decides what to persist, and writes the run-completion signal. Because it runs with the AgentRun's identity and credentials, a malicious or buggy orchestrator can:
+
+    - Issue arbitrary LLM calls billed to the AgentRun.
+    - Read, exfiltrate, or tamper with anything the sidecar has access to (secrets, mounted volumes, network).
+    - Force the run into any terminal state, including fabricating a successful result.
+    - Call the LLM in any pattern it likes — including patterns that bypass the safety guarantees of the run-level `useContext` policy.
+
+    This is a fundamentally broader trust grant than a [tool-sidecar](writing-tool-sidecars.md), whose actions are gated by the LLM's tool calls, the SympoziumPolicy, and the dispatch admission webhook. **Only run orchestrator sidecars you have written yourself, or that come from a source you fully trust and have audited.** Treat the SkillPack image reference for an orchestrator sidecar with the same scrutiny you would apply to a CI runner image that holds production deploy credentials.
+
 This guide explains how to build a sidecar that runs in [sidecar-driven mode](../modes/sidecar-driven.md). Unlike a [tool-sidecar](writing-tool-sidecars.md), an orchestrator sidecar drives the workflow end-to-end and calls the LLM as a sub-call.
 
 If you just need to give an agent access to a CLI binary, you don't want this — see [Writing Tool Sidecars](writing-tool-sidecars.md) for the agent-driven mode pattern.
