@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -62,6 +63,26 @@ type LLMProvider interface {
 	// AddToolResults records tool execution results in the conversation so
 	// the next Chat call can reference them.
 	AddToolResults(results []ToolResult)
+
+	// ResetContext wipes the conversation history. After
+	// ResetContext the next Chat or Prompt call behaves like a first-turn
+	// conversation. Used when a sidecar issues clearContext() between
+	// independent units of work so each unit starts token-flat rather than
+	// accumulating.
+	ResetContext()
+
+	// Prompt answers a single user prompt on behalf of a sidecar.
+	// The model never returns tool calls — the first return is the final
+	// text. When useContext is true the prompt is appended to existing
+	// history and the assistant reply recorded; when false the prompt is
+	// answered in isolation (implementations temporarily reset the message
+	// slice to [system, prompt] for the call and restore it after).
+	//
+	// Schema is an optional JSON Schema for structured output. When set,
+	// implementations attempt schema-validated output; the second return is
+	// the parsed payload when the model emitted JSON parseable as the
+	// schema. Token counts are returned in (inputTokens, outputTokens).
+	Prompt(ctx context.Context, prompt string, useContext bool, schema json.RawMessage) (string, []byte, int, int, error)
 }
 
 // runAgentLoop drives a provider through iterative tool calling until the

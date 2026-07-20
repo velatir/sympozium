@@ -41,6 +41,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/controller/taskmodes"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
 	"github.com/sympozium-ai/sympozium/internal/ipc"
 	"github.com/sympozium-ai/sympozium/internal/orchestrator"
@@ -604,8 +605,20 @@ func (r *AgentRunReconciler) reconcilePending(ctx context.Context, log logr.Logg
 		}
 	}
 
+	// Resolve task-mode adjustments. Validates the task object's
+	// mode + tool against the registered handler and computes per-sidecar
+	// mutations (OverrideCommand + AddEnv). For object-form tasks this
+	// surfaces handler validation errors here so the AgentRun CR's
+	// status.error reflects them — instead of the agent-runner dying 5s
+	// into the run with "TASK env var is empty" because the wiring was
+	// silently dropped. For string-form tasks this is a no-op.
+	sidecarAdjustments, taskErr := resolveTaskModeAdjustments(agentRun, sidecars)
+	if taskErr != nil {
+		return ctrl.Result{}, r.failRun(ctx, agentRun, taskErr.Error())
+	}
+
 	// Build and create the Job
-	job := r.buildJob(agentRun, memoryEnabled, observability, sidecars, mcpServers, allowedOutboundChannels)
+	job := r.buildJob(agentRun, memoryEnabled, observability, sidecars, mcpServers, allowedOutboundChannels, sidecarAdjustments)
 
 	// Inject shared workflow memory env vars and init container if the pack has shared memory.
 	r.injectSharedMemory(ctx, agentRun, job)
@@ -2246,6 +2259,7 @@ func (r *AgentRunReconciler) buildJob(
 	sidecars []resolvedSidecar,
 	mcpServers []sympoziumv1alpha1.MCPServerRef,
 	allowedOutboundChannels []string,
+	sidecarAdjustments []taskmodes.SidecarAdjustment,
 ) *batchv1.Job {
 	labels := map[string]string{
 		"sympozium.ai/agent-run":       agentRun.Name,
@@ -2264,7 +2278,7 @@ func (r *AgentRunReconciler) buildJob(
 	backoffLimit := int32(0)
 
 	// Build containers
-	containers, initContainers := r.buildContainers(agentRun, memoryEnabled, observability, sidecars, mcpServers, allowedOutboundChannels)
+	containers, initContainers := r.buildContainers(agentRun, memoryEnabled, observability, sidecars, mcpServers, allowedOutboundChannels, sidecarAdjustments)
 	volumes := r.buildVolumes(agentRun, memoryEnabled, sidecars, mcpServers)
 	hostNetwork, hostPID := derivePodHostAccess(sidecars)
 	dnsPolicy := corev1.DNSClusterFirst
@@ -2321,6 +2335,7 @@ func (r *AgentRunReconciler) buildContainers(
 	sidecars []resolvedSidecar,
 	mcpServers []sympoziumv1alpha1.MCPServerRef,
 	allowedOutboundChannels []string,
+	sidecarAdjustments []taskmodes.SidecarAdjustment,
 ) ([]corev1.Container, []corev1.Container) {
 	readOnly := true
 	noPrivEsc := false
@@ -2330,12 +2345,45 @@ func (r *AgentRunReconciler) buildContainers(
 		{Name: "AGENT_RUN_ID", Value: agentRun.Name},
 		{Name: "AGENT_ID", Value: agentRun.Spec.AgentID},
 		{Name: "SESSION_KEY", Value: agentRun.Spec.SessionKey},
-		{Name: "TASK", Value: agentRun.Spec.Task.GetPrompt()},
 		{Name: "SYSTEM_PROMPT", Value: agentRun.Spec.SystemPrompt},
 		{Name: "MODEL_PROVIDER", Value: agentRun.Spec.Model.Provider},
 		{Name: "MODEL_NAME", Value: agentRun.Spec.Model.Model},
 		{Name: "MODEL_BASE_URL", Value: agentRun.Spec.Model.BaseURL},
 		{Name: "THINKING_MODE", Value: agentRun.Spec.Model.Thinking},
+	}
+
+	// Only set TASK env when the task is a string-form prompt (Path A).
+	// For object-form tasks (Path B, e.g. sidecar-driven mode), the agent
+	// container doesn't receive a prompt from the controller — the sidecar
+	// drives individual LLM calls via /ipc/prompts/. Without this guard
+	// the agent-runner exits 1 in ~5s with "TASK env var is empty".
+	if agentRun.Spec.Task.IsString() || agentRun.Spec.Task.GetPrompt() != "" {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name:  "TASK",
+			Value: agentRun.Spec.Task.GetPrompt(),
+		})
+	}
+
+	// USE_CONTEXT controls whether the prompt-server loop preserves
+	// conversation history between LLM calls. Settable only on the CR; the
+	// sidecar cannot override per-request (protocol doc, internal/ipc).
+	// Default true on nil to preserve the historical behaviour for runs
+	// that pre-date the UseContext field.
+	useContext := true
+	if agentRun.Spec.UseContext != nil {
+		useContext = *agentRun.Spec.UseContext
+	}
+	agentEnv = append(agentEnv, corev1.EnvVar{
+		Name:  "USE_CONTEXT",
+		Value: strconv.FormatBool(useContext),
+	})
+
+	// Per-mode dispatch: object-form tasks get AGENT_MODE (and any other
+	// per-mode env vars) from the registered TaskModeHandler. For
+	// sidecar-driven mode this sets AGENT_MODE=prompt-server so the
+	// agent-runner skips the main agent loop and serves /ipc/prompts/.
+	if agentRun.Spec.Task != nil && agentRun.Spec.Task.IsObject() {
+		applyTaskModeToAgentContainer(agentRun.Spec.Task, &agentEnv)
 	}
 
 	// Inject RUN_TIMEOUT from the AgentRun spec or instance config.
@@ -2792,8 +2840,20 @@ func (r *AgentRunReconciler) buildContainers(
 	}
 
 	// Inject skill sidecar containers.
+	// Per-mode sidecar adjustments (override command + extra env) come
+	// from the TaskModeHandler dispatch. For sidecar-driven mode the
+	// initiator sidecar's command is overridden to the resolved tool's
+	// exec, and SYMPOZIUM_RUN_CONFIG_JSON is appended with the task
+	// parameters (see internal/controller/taskmodes/sidecar_driven.go).
+	adjustmentByPack := make(map[string]taskmodes.SidecarAdjustment, len(sidecarAdjustments))
+	for _, adj := range sidecarAdjustments {
+		adjustmentByPack[adj.SkillPackName] = adj
+	}
 	for _, sc := range sidecars {
 		cmd := sc.sidecar.Command
+		if adj, ok := adjustmentByPack[sc.skillPackName]; ok && len(adj.OverrideCommand) > 0 {
+			cmd = adj.OverrideCommand
+		}
 
 		var envVars []corev1.EnvVar
 		// SYMPOZIUM_SKILL_PACK identifies this sidecar to the tool-executor
@@ -2805,6 +2865,9 @@ func (r *AgentRunReconciler) buildContainers(
 		})
 		for _, e := range sc.sidecar.Env {
 			envVars = append(envVars, toCoreEnvVar(e))
+		}
+		if adj, ok := adjustmentByPack[sc.skillPackName]; ok {
+			envVars = append(envVars, adj.AddEnv...)
 		}
 
 		mounts := []corev1.VolumeMount{

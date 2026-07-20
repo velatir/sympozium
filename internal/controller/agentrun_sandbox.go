@@ -203,8 +203,17 @@ func (r *AgentRunReconciler) reconcilePendingAgentSandbox(
 		}
 	}
 
+	// Resolve task-mode adjustments. Same as the Job path —
+	// the dispatch is mode-agnostic. Object-form tasks return their
+	// per-sidecar mutations; string-form tasks return nil and skip the
+	// dispatch entirely.
+	sidecarAdjustments, taskErr := resolveTaskModeAdjustments(agentRun, taskSidecars)
+	if taskErr != nil {
+		return ctrl.Result{}, r.failRun(ctx, agentRun, taskErr.Error())
+	}
+
 	// Build containers/volumes using the existing shared logic.
-	containers, initContainers := r.buildContainers(agentRun, memoryEnabled, observability, taskSidecars, mcpServers, allowedOutboundChannels)
+	containers, initContainers := r.buildContainers(agentRun, memoryEnabled, observability, taskSidecars, mcpServers, allowedOutboundChannels, sidecarAdjustments)
 	volumes := r.buildVolumes(agentRun, memoryEnabled, taskSidecars, mcpServers)
 
 	// Build the Sandbox CR or SandboxClaim.

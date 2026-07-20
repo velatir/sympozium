@@ -191,6 +191,19 @@ func main() {
 		fatal("TASK env var is empty and no /ipc/input/task.json found")
 	}
 
+	// AGENT_MODE=prompt-server: a sidecar drives the
+	// LLM directly via /ipc/prompts/ IPC. The agent-runner skips the main
+	// agent loop entirely; instead it serves individual LLM calls from
+	// the sidecar and exits when /ipc/done is observed.
+	//
+	// The controller (buildContainers) only sets AGENT_MODE for object-form
+	// tasks (`task.mode = sidecar-driven`). String-form tasks fall through
+	// to the normal main agent loop below.
+	if getEnv("AGENT_MODE", "") == "prompt-server" {
+		runPromptServerAgent()
+		return
+	}
+
 	// Dry run mode: produce a synthetic result without calling the LLM.
 	// Used to trace sequential pipeline execution paths.
 	if getEnv("DRY_RUN", "") == "true" {
@@ -658,6 +671,82 @@ func writeJSON(path string, v any) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		log.Printf("WARNING: failed to write %s: %v", path, err)
 	}
+}
+
+// runPromptServerAgent is the prompt-server entry point
+// invoked from main() when AGENT_MODE=prompt-server. It runs the prompt
+// service loop and finalises the AgentRun by copying /ipc/run-result.json
+// (written by the sidecar in a finally block) to /ipc/output/result.json and
+// emitting the __SYMPOZIUM_RESULT__ marker that the controller reads from
+// pod logs to transition the AgentRun to Succeeded/Failed.
+//
+// On clean exit (loop returned nil = /ipc/done observed): success path.
+// On any error (provider build, loop failure, missing/malformed run-result):
+// fatal exit so the controller marks the AgentRun as Failed.
+func runPromptServerAgent() {
+	log.Println("agent-runner prompt-server mode")
+
+	provider := strings.ToLower(getEnv("MODEL_PROVIDER", "openai"))
+	modelName := getEnv("MODEL_NAME", "gpt-4o-mini")
+	baseURL := strings.TrimRight(getEnv("MODEL_BASE_URL", ""), "/")
+	systemPrompt := getEnv("SYSTEM_PROMPT", "You are a helpful AI assistant.")
+
+	var providerHeaders map[string]string
+	if headersJSON := getEnv("MODEL_PROVIDER_HEADERS", ""); headersJSON != "" {
+		if err := json.Unmarshal([]byte(headersJSON), &providerHeaders); err != nil {
+			log.Printf("WARNING: failed to parse MODEL_PROVIDER_HEADERS: %v", err)
+		}
+	}
+
+	// Build the run timeout context. The prompt-server path doesn't run
+	// the main agent loop, but it still respects the AgentRun's timeout
+	// so a hung sidecar doesn't outlive the controller's deadline.
+	rt := effectiveRunTimeout(provider)
+	ctx, cancel := context.WithTimeout(context.Background(), rt)
+	defer cancel()
+
+	err := runPromptServiceLoop(PromptServerDeps{
+		Ctx:             ctx,
+		ProviderName:    provider,
+		APIKey:          firstNonEmpty(os.Getenv("API_KEY"), os.Getenv("OPENAI_API_KEY"), os.Getenv("ANTHROPIC_API_KEY"), os.Getenv("AZURE_OPENAI_API_KEY"), os.Getenv("PROVIDER_API_KEY")),
+		BaseURL:         baseURL,
+		Model:           modelName,
+		SystemPrompt:    systemPrompt,
+		Task:            "", // No initial user turn in prompt-server mode.
+		Tools:           nil,
+		ProviderHeaders: providerHeaders,
+	})
+	if err != nil {
+		fatal("prompt-server: " + err.Error())
+	}
+
+	// Loop exited cleanly (/ipc/done observed). Read the run-result the
+	// sidecar wrote and surface it on the AgentRun.
+	runResultPath := getEnv("SYMPOZIUM_RUN_RESULT_PATH", "/ipc/run-result.json")
+	data, readErr := os.ReadFile(runResultPath)
+	if readErr != nil {
+		fatal("prompt-server: missing run-result.json at " + runResultPath + ": " + readErr.Error())
+	}
+
+	// Validate JSON before publishing so the controller never sees a
+	// half-written /ipc/output/result.json. The sidecar contract is a
+	// status+metrics+response|error payload; we forward verbatim and let
+	// the controller's existing marker parsing do the field validation.
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		fatal("prompt-server: malformed run-result.json: " + err.Error())
+	}
+
+	_ = os.MkdirAll("/ipc/output", 0o755)
+	if err := os.WriteFile("/ipc/output/result.json", data, 0o644); err != nil {
+		log.Printf("WARNING: failed to copy run-result.json to /ipc/output/result.json: %v", err)
+	}
+
+	// The controller reads the result from the __SYMPOZIUM_RESULT__ log
+	// marker (agentrun_controller.go parses this from pod logs). Emit it
+	// verbatim — payload shape matches the controller's expectation.
+	fmt.Fprintf(os.Stdout, "\n__SYMPOZIUM_RESULT__%s__SYMPOZIUM_END__\n", string(data))
+	log.Println("prompt-server: surfaced run-result on AgentRun via marker")
 }
 
 func getEnv(key, fallback string) string {

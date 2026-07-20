@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -12,13 +13,16 @@ import (
 // It replays a scripted sequence of ChatResult values, one per Chat() call,
 // and records every AddToolResults invocation for assertions.
 type mockProvider struct {
-	name      string
-	model     string
-	turns     []ChatResult
-	turnErr   []error // err[i] returned on turn i (nil = no error)
-	idx       int
-	toolLog   [][]ToolResult
-	chatCalls int
+	name           string
+	model          string
+	turns          []ChatResult
+	turnErr        []error // err[i] returned on turn i (nil = no error)
+	idx            int
+	toolLog        [][]ToolResult
+	chatCalls      int
+	promptCalls    int
+	promptReturns  []string
+	resetCount     int
 }
 
 func (p *mockProvider) Name() string  { return p.name }
@@ -40,6 +44,23 @@ func (p *mockProvider) Chat(ctx context.Context) (ChatResult, error) {
 
 func (p *mockProvider) AddToolResults(results []ToolResult) {
 	p.toolLog = append(p.toolLog, results)
+}
+
+// ResetContext is a no-op for the mock — tests assert
+// ResetCount separately when context-isolation behaviour matters.
+func (p *mockProvider) ResetContext() {
+	p.resetCount++
+}
+
+// Prompt returns a scripted response or, when none is
+// queued, a deterministic answer based on the prompt hash so tests can
+// round-trip request→result without bespoke fixtures.
+func (p *mockProvider) Prompt(ctx context.Context, prompt string, useContext bool, schema json.RawMessage) (string, []byte, int, int, error) {
+	p.promptCalls++
+	if p.idx-1 < len(p.promptReturns) && p.promptReturns[p.idx-1] != "" {
+		return p.promptReturns[p.idx-1], nil, 1, 1, nil
+	}
+	return fmt.Sprintf("echo:%s", prompt), nil, 1, 1, nil
 }
 
 // TestRunAgentLoop_TerminalTextOnly: a single turn with text and no tool calls

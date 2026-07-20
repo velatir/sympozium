@@ -8,6 +8,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/controller/taskmodes"
 )
 
 func TestSidecarsHaveTools(t *testing.T) {
@@ -148,7 +149,7 @@ func TestSidecarTools_PodSpecWiring(t *testing.T) {
 	}
 
 	// Agent container gets the read-only mount + manifest-path env.
-	cs, _ := r.buildContainers(run, false, nil, withTools, nil, nil)
+	cs, _ := r.buildContainers(run, false, nil, withTools, nil, nil, nil)
 	agent := cs[0]
 	var mountOK bool
 	for _, m := range agent.VolumeMounts {
@@ -182,4 +183,159 @@ func TestSidecarTools_PodSpecWiring(t *testing.T) {
 			t.Error("sidecar-tools volume must not appear when no tools are declared")
 		}
 	}
+}
+
+// TestBuildContainers_ObjectTaskSetsAgentMode: when spec.task is
+// object-form with mode=sidecar-driven, the agent container must receive
+// AGENT_MODE=prompt-server so the agent-runner skips the main loop and
+// serves /ipc/prompts/ instead.
+func TestBuildContainers_ObjectTaskSetsAgentMode(t *testing.T) {
+	r := &AgentRunReconciler{}
+	run := newTestRun()
+	run.Spec.Task = &sympoziumv1alpha1.TaskSpec{
+		Mode: "sidecar-driven",
+		Tool: "collector_run",
+		Parameters: map[string]string{
+			"services": `["chatgpt"]`,
+		},
+	}
+
+	cs, _ := r.buildContainers(run, false, nil, nil, nil, nil, nil)
+	agent := cs[0]
+
+	var sawAgentMode bool
+	for _, e := range agent.Env {
+		if e.Name == "AGENT_MODE" && e.Value == "prompt-server" {
+			sawAgentMode = true
+		}
+		if e.Name == "TASK" {
+			t.Errorf("object-form task must NOT set TASK env (was %q)", e.Value)
+		}
+	}
+	if !sawAgentMode {
+		t.Error("expected AGENT_MODE=prompt-server on agent container env")
+	}
+}
+
+// TestBuildContainers_ObjectTaskSetsUseContext: the AgentRun's
+// UseContext toggle is propagated to the agent container as USE_CONTEXT.
+// Default on nil is true.
+func TestBuildContainers_ObjectTaskSetsUseContext(t *testing.T) {
+	r := &AgentRunReconciler{}
+
+	cases := []struct {
+		name    string
+		set     *bool
+		wantEnv string
+	}{
+		{"nil defaults to true", nil, "true"},
+		{"explicit true", ptrBool(true), "true"},
+		{"explicit false", ptrBool(false), "false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newTestRun()
+			run.Spec.UseContext = tc.set
+			cs, _ := r.buildContainers(run, false, nil, nil, nil, nil, nil)
+			var saw bool
+			for _, e := range cs[0].Env {
+				if e.Name == "USE_CONTEXT" && e.Value == tc.wantEnv {
+					saw = true
+				}
+			}
+			if !saw {
+				t.Errorf("expected USE_CONTEXT=%s, got env=%v", tc.wantEnv, cs[0].Env)
+			}
+		})
+	}
+}
+
+// TestBuildContainers_StringTaskSetsTASK (regression guard): string-form
+// tasks still set TASK env (Path A: prompt goes to the LLM via TASK).
+func TestBuildContainers_StringTaskSetsTASK(t *testing.T) {
+	r := &AgentRunReconciler{}
+	run := newTestRun()
+	const prompt = "Run a content collection sweep."
+	run.Spec.Task = sympoziumv1alpha1.NewStringTask(prompt)
+
+	cs, _ := r.buildContainers(run, false, nil, nil, nil, nil, nil)
+	agent := cs[0]
+
+	var sawTask bool
+	for _, e := range agent.Env {
+		if e.Name == "TASK" && e.Value == prompt {
+			sawTask = true
+		}
+		if e.Name == "AGENT_MODE" {
+			t.Errorf("string-form task must NOT set AGENT_MODE (was %q)", e.Value)
+		}
+	}
+	if !sawTask {
+		t.Errorf("expected TASK=%q on agent container env", prompt)
+	}
+}
+
+// TestBuildContainers_SidecarAdjustmentApplied: SidecarAdjustments
+// from the TaskModeHandler dispatch override the sidecar command and append
+// extra env. The skill loop in buildContainers must read the adjustments map
+// keyed by SkillPackName.
+func TestBuildContainers_SidecarAdjustmentApplied(t *testing.T) {
+	r := &AgentRunReconciler{}
+	run := newTestRun()
+
+	sidecars := []resolvedSidecar{{
+		skillPackName: "sd-collector",
+		sidecar: sympoziumv1alpha1.SkillSidecar{
+			Image:   "example/sidecar:latest",
+			Command: []string{"echo", "default"},
+		},
+	}}
+	adjustments := []taskmodes.SidecarAdjustment{
+		{
+			SkillPackName:   "sd-collector",
+			OverrideCommand: []string{"node", "/app/cli.js", "primary"},
+			AddEnv: []corev1.EnvVar{
+				{Name: "SYMPOZIUM_RUN_CONFIG_JSON", Value: `{"services":["chatgpt"]}`},
+			},
+		},
+	}
+
+	cs, _ := r.buildContainers(run, false, nil, sidecars, nil, nil, adjustments)
+
+	var found bool
+	for _, c := range cs {
+		if c.Name != "skill-sd-collector" {
+			continue
+		}
+		found = true
+		if !equalSlice(c.Command, []string{"node", "/app/cli.js", "primary"}) {
+			t.Errorf("sidecar Command = %v, want override", c.Command)
+		}
+		var sawConfig bool
+		for _, e := range c.Env {
+			if e.Name == "SYMPOZIUM_RUN_CONFIG_JSON" && e.Value == `{"services":["chatgpt"]}` {
+				sawConfig = true
+			}
+		}
+		if !sawConfig {
+			t.Errorf("sidecar env missing SYMPOZIUM_RUN_CONFIG_JSON: %v", c.Env)
+		}
+	}
+	if !found {
+		t.Fatal("skill-sd-collector sidecar container not found")
+	}
+}
+
+func ptrBool(b bool) *bool { return &b }
+
+func equalSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
