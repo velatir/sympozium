@@ -223,6 +223,28 @@ jobs:
           CHART_VERSION="${VERSION#v}"
           # Login again for the OCI push (helm registry login is per-process).
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          # The sympozium chart depends on llmfit-dra (declared in
+          # charts/sympozium/Chart.yaml). When pushing to an OCI registry,
+          # helm verifies dependency blobs at the destination before it can
+          # push the parent chart. Mirror llmfit-dra to oci://ghcr.io/velatir
+          # first (idempotent — only push if not already present) so the
+          # parent chart push can verify its dependency.
+          # llmfit-dra has its own semver, not derived from the sympozium
+          # release. Walk the dependency directory to find the actual tarball.
+          LLMFIT_TGZ="$(ls charts/sympozium/charts/llmfit-dra-*.tgz 2>/dev/null | head -1 || true)"
+          if [ -n "${LLMFIT_TGZ}" ] && [ -f "${LLMFIT_TGZ}" ]; then
+            LLMFIT_VERSION="$(basename "${LLMFIT_TGZ}" .tgz | sed 's/^llmfit-dra-//')"
+            if helm show chart "oci://ghcr.io/velatir/llmfit-dra:${LLMFIT_VERSION}" > /dev/null 2>&1; then
+              echo "llmfit-dra:${LLMFIT_VERSION} already mirrored at oci://ghcr.io/velatir, skipping"
+            else
+              echo "Mirroring llmfit-dra:${LLMFIT_VERSION} to oci://ghcr.io/velatir..."
+              helm push "${LLMFIT_TGZ}" oci://ghcr.io/velatir
+            fi
+          else
+            echo "WARNING: no llmfit-dra-*.tgz found under charts/sympozium/charts/"
+          fi
+
           helm push .helm-packages/sympozium-crds-${CHART_VERSION}.tgz oci://ghcr.io/velatir
           helm push .helm-packages/sympozium-${CHART_VERSION}.tgz      oci://ghcr.io/velatir
 
