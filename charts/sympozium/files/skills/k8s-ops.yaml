@@ -146,6 +146,43 @@ spec:
     resources:
       cpu: "100m"
       memory: "128Mi"
+    # Native tool: apply a YAML manifest (e.g. an AgentRun to trigger a downstream
+    # agent after the collector finishes a batch). The manifest arrives as stdin;
+    # the sidecar's tool-executor pipes it into `kubectl apply -f -`. Requires the
+    # agent to pass a valid Kubernetes manifest — the collector's save_batch tool
+    # emits one in its nextStep field for the parser-trigger use case.
+    tools:
+      - name: k8s_ops_apply
+        description: Apply a Kubernetes manifest (YAML) to the cluster. The manifest arrives as the `manifest` parameter and is piped to `kubectl apply -f -`. Use for creating/updating any Kubernetes resource — AgentRuns, Jobs, Deployments, ConfigMaps, etc. — when a sidecar tool or another agent's nextStep has produced one.
+        exec: ["kubectl", "apply", "-f", "-"]
+        inputMode: stdin
+        parameters:
+          type: object
+          properties:
+            manifest:
+              type: string
+              description: YAML manifest to apply (apiVersion, kind, metadata, spec).
+            namespace:
+              type: string
+              description: Optional. Override the namespace declared in the manifest. Useful when the manifest was generated for a different cluster context.
+          required: ["manifest"]
+      - name: k8s_ops_delete
+        description: Delete a Kubernetes resource by reference (kind/name[/namespace]). Useful for cleaning up resources created by k8s_ops_apply (e.g. cancelling a triggered AgentRun before it has finished).
+        exec: ["kubectl", "delete"]
+        inputMode: args
+        parameters:
+          type: object
+          properties:
+            kind:
+              type: string
+              description: Kubernetes resource kind (e.g. AgentRun, Job, Pod)
+            name:
+              type: string
+              description: Resource name
+            namespace:
+              type: string
+              description: Resource namespace
+          required: ["kind", "name"]
     # Namespace-scoped RBAC: full admin on workloads and core resources
     rbac:
       - apiGroups: [""]
@@ -169,6 +206,9 @@ spec:
       - apiGroups: ["rbac.authorization.k8s.io"]
         resources: ["roles", "rolebindings"]
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+      - apiGroups: ["metrics.k8s.io"]
+        resources: ["pods"]
+        verbs: ["get", "list"]
     # Cluster-scoped RBAC: full read + node/namespace management
     clusterRBAC:
       - apiGroups: [""]
@@ -192,3 +232,6 @@ spec:
       - apiGroups: ["apiextensions.k8s.io"]
         resources: ["customresourcedefinitions"]
         verbs: ["get", "list", "watch"]
+      - apiGroups: ["metrics.k8s.io"]
+        resources: ["pods", "nodes"]
+        verbs: ["get", "list"]
