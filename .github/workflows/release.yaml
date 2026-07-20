@@ -190,6 +190,53 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run docs.yml
 
+  # ── Publish Helm chart to GHCR OCI registry (velatir consumers) ──────────────
+  publish-helm-chart-oci:
+    name: Publish Helm chart to GHCR OCI
+    needs: publish-helm-chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Package charts
+        run: |
+          # Bundled llmfit-dra dependency (Chart.lock) — resolve before packaging.
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm dependency build charts/sympozium
+          helm package charts/sympozium-crds --destination .helm-packages
+          helm package charts/sympozium      --destination .helm-packages
+
+      - name: Push charts to GHCR OCI
+        env:
+          VERSION: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          # Strip leading 'v' for chart versions; image tags keep the 'v'.
+          CHART_VERSION="${VERSION#v}"
+          # Login again for the OCI push (helm registry login is per-process).
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm push .helm-packages/sympozium-crds-${CHART_VERSION}.tgz oci://ghcr.io/velatir
+          helm push .helm-packages/sympozium-${CHART_VERSION}.tgz      oci://ghcr.io/velatir
+
+      - name: Notify velatir-infrastructure
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.VELATIR_INFRA_DISPATCH_TOKEN }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          gh api repos/velatir/velatir-infrastructure/dispatches \
+            -f event_type=velatir-sympozium-charts-published \
+            -f client_payload[version]="${VERSION}" \
+            -f client_payload[registry]=oci://ghcr.io/velatir
+
   # ── Update Homebrew tap (disabled — upstream-only) ───────────────────────────
   update-homebrew:
     name: Update Homebrew tap
