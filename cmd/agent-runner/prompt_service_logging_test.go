@@ -74,7 +74,7 @@ func TestLogPromptServiceReq_EmitsFullPromptWhenUnderCap(t *testing.T) {
 
 // TestLogPromptServiceReq_TruncatesOverCap verifies the cap-based
 // truncation works: the prompt is shortened to promptServiceLogMaxBytes
-// and the standard truncate() ellipsis marker ("...") is appended.
+// and the standard truncateStr() ellipsis marker ("...") is appended.
 // Mirrors how the default-mode provider error path uses the same helper
 // at provider_openai.go:119 etc.
 func TestLogPromptServiceReq_TruncatesOverCap(t *testing.T) {
@@ -91,10 +91,10 @@ func TestLogPromptServiceReq_TruncatesOverCap(t *testing.T) {
 		t.Fatalf("expected full promptBytes=64 in %q", out)
 	}
 	if !strings.Contains(out, "aaaaaaaa...") {
-		t.Fatalf("expected truncate() body ('aaaaaaaa...') in %q", out)
+		t.Fatalf("expected truncateStr() body ('aaaaaaaa...') in %q", out)
 	}
 	if strings.Contains(out, "truncated 56 bytes") {
-		t.Fatalf("old bespoke marker still present, expected truncate() helper: %q", out)
+		t.Fatalf("old bespoke marker still present, expected truncateStr() helper: %q", out)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestLogPromptServiceRes_ErrorPath(t *testing.T) {
 }
 
 // TestLogPromptServiceRes_TruncatesOverCap confirms the same cap
-// truncation applies on the response side, using the shared truncate()
+// truncation applies on the response side, using the shared truncateStr()
 // helper.
 func TestLogPromptServiceRes_TruncatesOverCap(t *testing.T) {
 	buf, restore := withLogCapture(t)
@@ -216,10 +216,10 @@ func TestLogPromptServiceRes_TruncatesOverCap(t *testing.T) {
 		t.Fatalf("expected full payloadBytes=200 in %q", out)
 	}
 	if !strings.Contains(out, "zzzzzzzzzzzzzzzz...") {
-		t.Fatalf("expected truncate() body (16 'z's + '...') in %q", out)
+		t.Fatalf("expected truncateStr() body (16 'z's + '...') in %q", out)
 	}
 	if strings.Contains(out, "truncated 184 bytes") {
-		t.Fatalf("old bespoke marker still present, expected truncate() helper: %q", out)
+		t.Fatalf("old bespoke marker still present, expected truncateStr() helper: %q", out)
 	}
 }
 

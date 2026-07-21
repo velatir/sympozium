@@ -272,15 +272,17 @@ func writePromptResult(dir, requestID string, result ipcPromptResult) {
 // the sidecar-driven loop. The cap is promptServiceLogMaxBytes (override
 // via PROMPT_SERVICE_LOG_MAX_BYTES); set to 0 to disable. The full byte
 // length is always recorded so operators can correlate with truncation.
-// Truncation uses the same `truncate(s, n)` helper as the rest of the
-// agent-runner (provider error strings, task metadata) so the
-// "..." marker format matches the default task-mode logs.
+// Truncation reuses the shared `truncateStr(s, n)` helper from tools.go
+// (same body as `truncate` in main.go:864) — the same one used at tool
+// call-arg sites (tools.go:347), exec-label sites (tools.go:1088), and
+// provider error sites (provider_openai.go:119, provider_anthropic.go:88).
+// Marker convention: `s[:n] + "..."`.
 func logPromptServiceReq(req ipcPromptRequest) {
 	if promptServiceLogMaxBytes == 0 {
 		return
 	}
 	log.Printf("prompt service req: requestId=%s promptBytes=%d schemaBytes=%d prompt=%q",
-		req.RequestID, len(req.Prompt), len(req.Schema), truncate(req.Prompt, promptServiceLogMaxBytes))
+		req.RequestID, len(req.Prompt), len(req.Schema), truncateStr(req.Prompt, promptServiceLogMaxBytes))
 }
 
 // logPromptServiceRes emits a "res:" line capturing the LLM response for
@@ -289,9 +291,9 @@ func logPromptServiceReq(req ipcPromptRequest) {
 // available; falls back to the text Content otherwise. The cap is
 // promptServiceLogMaxBytes (override via PROMPT_SERVICE_LOG_MAX_BYTES);
 // set to 0 to disable. The full byte length is always recorded so
-// operators can correlate with truncation. Truncation uses the same
-// `truncate(s, n)` helper as the rest of the agent-runner so the
-// "..." marker format matches.
+// operators can correlate with truncation. Truncation reuses the shared
+// `truncateStr(s, n)` helper so the marker format matches the rest of
+// the agent-runner.
 func logPromptServiceRes(result ipcPromptResult) {
 	if promptServiceLogMaxBytes == 0 {
 		return
@@ -307,7 +309,7 @@ func logPromptServiceRes(result ipcPromptResult) {
 		payloadKind = "error"
 	}
 	log.Printf("prompt service res: requestId=%s status=%s payloadKind=%s payloadBytes=%d payload=%s",
-		result.RequestID, result.Status, payloadKind, len(payload), truncate(payload, promptServiceLogMaxBytes))
+		result.RequestID, result.Status, payloadKind, len(payload), truncateStr(payload, promptServiceLogMaxBytes))
 }
 
 // buildLLMProvider constructs a fresh LLMProvider for the prompt service
