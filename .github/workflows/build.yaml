@@ -218,7 +218,13 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
           helm push .helm-packages/sympozium-crds-${VERSION}.tgz oci://ghcr.io/velatir
-          helm push .helm-packages/sympozium-${VERSION}.tgz      oci://ghcr.io/velatir
+          # The sympozium chart is published under the OCI package name
+          # `velatir-sympozium` (the Chart.yaml `name:` field, renamed in the
+          # Velatir fork to avoid a collision with the orphaned
+          # `velatir/sympozium` GHCR package). The packaged .tgz uses the
+          # chart name as the basename, so the file is
+          # `velatir-sympozium-${VERSION}.tgz`.
+          helm push .helm-packages/velatir-sympozium-${VERSION}.tgz oci://ghcr.io/velatir
 
       - name: Notify velatir-infrastructure (dev only)
         if: success()
