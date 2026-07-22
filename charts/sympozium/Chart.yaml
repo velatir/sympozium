@@ -1,5 +1,16 @@
 apiVersion: v2
-name: sympozium
+# Renamed from "sympozium" in the Velatir fork (VEL-1173).
+#
+# `ghcr.io/velatir/sympozium` already exists as a GHCR OCI package with
+# orphaned, untagged manifests from earlier failed helm push attempts. GHCR
+# refuses new helm content to that package.
+#
+# This rename moves the helm chart's OCI artifact to
+# `ghcr.io/velatir/velatir-sympozium`, which is unused. Consumers (Flux
+# `HelmRelease` in velatir-infrastructure) point at the new chart name.
+# CRDs chart is unaffected — its own name `sympozium-crds` produces the
+# distinct `ghcr.io/velatir/sympozium-crds` OCI package, no conflict.
+name: velatir-sympozium
 description: Sympozium — run a fleet of AI agents on Kubernetes
 type: application
 version: 0.10.43
