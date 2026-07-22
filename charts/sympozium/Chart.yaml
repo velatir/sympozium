@@ -21,8 +21,23 @@ keywords:
   - llm
   - sympozium
 icon: https://raw.githubusercontent.com/sympozium-ai/sympozium/main/icon.png
-dependencies:
-  - name: llmfit-dra
-    version: 0.3.0
-    repository: oci://ghcr.io/sympozium-ai/charts
-    condition: llmfit-dra.enabled
+# dependencies:
+#   - name: llmfit-dra
+#     version: 0.3.0
+#     repository: oci://ghcr.io/sympozium-ai/charts
+#     condition: llmfit-dra.enabled
+#
+# Removed in the Velatir fork (VEL-1173). The upstream chart depends on
+# llmfit-dra via the OCI registry, which makes `helm push` to a fresh
+# OCI package fail with 403 Forbidden — helm OCI push creates a referrer
+# artifact pointing to the dependency's blob inside the parent package's
+# own blob store, and the parent can't be initialized without that blob
+# already being there. See:
+#   https://github.com/velatir/sympozium/pull/15 (llmfit-dra mirror attempt, insufficient)
+# The Velatir cluster disables llmfit (llmfit.enabled: false) and llmfit-dra
+# (llmfit-dra.enabled: false) in the HelmRelease values, so the dependency
+# was never used at install time. If/when llmfit is needed in the fork,
+# bring this back with a different distribution strategy (e.g. bundle
+# llmfit-dra into the fork as an in-repo chart, or push to GitHub
+# Releases + Pages like upstream does).
+dependencies: []
