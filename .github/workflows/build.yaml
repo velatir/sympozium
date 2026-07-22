@@ -217,26 +217,14 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
-          # The sympozium chart depends on llmfit-dra (declared in
-          # charts/sympozium/Chart.yaml). When pushing to an OCI registry,
-          # helm verifies dependency blobs at the destination before it can
-          # push the parent chart. Mirror llmfit-dra to oci://ghcr.io/velatir
-          # first (idempotent — only push if not already present) so the
-          # parent chart push can verify its dependency.
-          LLMFIT_TGZ="charts/sympozium/charts/llmfit-dra-0.3.0.tgz"
-          if [ -f "${LLMFIT_TGZ}" ]; then
-            if helm show chart "oci://ghcr.io/velatir/llmfit-dra:0.3.0" > /dev/null 2>&1; then
-              echo "llmfit-dra:0.3.0 already mirrored at oci://ghcr.io/velatir, skipping"
-            else
-              echo "Mirroring llmfit-dra:0.3.0 to oci://ghcr.io/velatir..."
-              helm push "${LLMFIT_TGZ}" oci://ghcr.io/velatir
-            fi
-          else
-            echo "WARNING: ${LLMFIT_TGZ} not found — sympozium chart's llmfit-dra dependency was not downloaded."
-          fi
-
           helm push .helm-packages/sympozium-crds-${VERSION}.tgz oci://ghcr.io/velatir
-          helm push .helm-packages/sympozium-${VERSION}.tgz      oci://ghcr.io/velatir
+          # The sympozium chart is published under the OCI package name
+          # `velatir-sympozium` (the Chart.yaml `name:` field, renamed in the
+          # Velatir fork to avoid a collision with the orphaned
+          # `velatir/sympozium` GHCR package). The packaged .tgz uses the
+          # chart name as the basename, so the file is
+          # `velatir-sympozium-${VERSION}.tgz`.
+          helm push .helm-packages/velatir-sympozium-${VERSION}.tgz oci://ghcr.io/velatir
 
       - name: Notify velatir-infrastructure (dev only)
         if: success()
