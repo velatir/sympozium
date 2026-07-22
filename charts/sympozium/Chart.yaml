@@ -1,16 +1,5 @@
 apiVersion: v2
-# Renamed from "sympozium" in the Velatir fork (VEL-1173).
-#
-# `ghcr.io/velatir/sympozium` already exists as a GHCR OCI package with
-# orphaned, untagged manifests from earlier failed helm push attempts. GHCR
-# refuses new helm content to that package.
-#
-# This rename moves the helm chart's OCI artifact to
-# `ghcr.io/velatir/velatir-sympozium`, which is unused. Consumers (Flux
-# `HelmRelease` in velatir-infrastructure) point at the new chart name.
-# CRDs chart is unaffected — its own name `sympozium-crds` produces the
-# distinct `ghcr.io/velatir/sympozium-crds` OCI package, no conflict.
-name: velatir-sympozium
+name: sympozium
 description: Sympozium — run a fleet of AI agents on Kubernetes
 type: application
 version: 0.10.43
@@ -32,23 +21,8 @@ keywords:
   - llm
   - sympozium
 icon: https://raw.githubusercontent.com/sympozium-ai/sympozium/main/icon.png
-# dependencies:
-#   - name: llmfit-dra
-#     version: 0.3.0
-#     repository: oci://ghcr.io/sympozium-ai/charts
-#     condition: llmfit-dra.enabled
-#
-# Removed in the Velatir fork (VEL-1173). The upstream chart depends on
-# llmfit-dra via the OCI registry, which makes `helm push` to a fresh
-# OCI package fail with 403 Forbidden — helm OCI push creates a referrer
-# artifact pointing to the dependency's blob inside the parent package's
-# own blob store, and the parent can't be initialized without that blob
-# already being there. See:
-#   https://github.com/velatir/sympozium/pull/15 (llmfit-dra mirror attempt, insufficient)
-# The Velatir cluster disables llmfit (llmfit.enabled: false) and llmfit-dra
-# (llmfit-dra.enabled: false) in the HelmRelease values, so the dependency
-# was never used at install time. If/when llmfit is needed in the fork,
-# bring this back with a different distribution strategy (e.g. bundle
-# llmfit-dra into the fork as an in-repo chart, or push to GitHub
-# Releases + Pages like upstream does).
-dependencies: []
+dependencies:
+  - name: llmfit-dra
+    version: 0.3.0
+    repository: oci://ghcr.io/sympozium-ai/charts
+    condition: llmfit-dra.enabled

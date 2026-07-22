@@ -226,12 +226,11 @@ jobs:
 
           helm push .helm-packages/sympozium-crds-${CHART_VERSION}.tgz oci://ghcr.io/velatir
           # The sympozium chart is published under the OCI package name
-          # `velatir-sympozium` (the Chart.yaml `name:` field, renamed in the
-          # Velatir fork to avoid a collision with the orphaned
-          # `velatir/sympozium` GHCR package). The packaged .tgz uses the
-          # chart name as the basename, so the file is
-          # `velatir-sympozium-${CHART_VERSION}.tgz`.
-          helm push .helm-packages/velatir-sympozium-${CHART_VERSION}.tgz oci://ghcr.io/velatir
+          # `sympozium` (the Chart.yaml `name:` field). The packaged .tgz
+          # uses the chart name as the basename, so the file is
+          # `sympozium-${CHART_VERSION}.tgz`. Pushed to oci://ghcr.io/velatir,
+          # which lands at ghcr.io/velatir/sympozium:${VERSION}.
+          helm push .helm-packages/sympozium-${CHART_VERSION}.tgz oci://ghcr.io/velatir
 
       - name: Notify velatir-infrastructure
         if: success()
