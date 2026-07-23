@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io/sympozium-ai/sympozium
+  REGISTRY: ghcr.io/velatir/sympozium
 
 permissions:
   contents: read
@@ -96,7 +96,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     needs: [changes, verify]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       matrix:
         image:
@@ -154,3 +154,85 @@ jobs:
           # effectively cold.
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  # ── Publish Helm chart to GHCR OCI on every main push ─────────────────────────
+  # For quick debugging iterations on the Velatir fork: every push to main
+  # packages the chart with version "<chart_version>-<short_sha>" and pushes
+  # to GHCR OCI, then dispatches to velatir-infrastructure so agents-dev
+  # pins to it automatically. agents-prod is unaffected — production stays
+  # pinned to the latest release tag, bumped via the existing
+  # velatir-sympozium-charts-published dispatch from release.yaml.
+  #
+  # Runs on EVERY push to main (and on workflow_dispatch). It does NOT gate
+  # on the `changes` filter — code-only pushes still need the chart republished
+  # so Chart.AppVersion carries the new image SHA, otherwise Flux stays
+  # pinned to the old chart and the new image is built but never consumed.
+  publish-chart-oci:
+    name: Publish chart to GHCR OCI (main)
+    needs: [verify]
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Compute chart version
+        id: version
+        run: |
+          set -euo pipefail
+          CHART_VERSION=$(grep '^version:' charts/sympozium/Chart.yaml | awk '{print $2}')
+          SHORT_SHA="${GITHUB_SHA::7}"
+          VERSION="${CHART_VERSION}-${SHORT_SHA}"
+          echo "chart_version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"         >> "$GITHUB_OUTPUT"
+          echo "Pinning chart version: ${VERSION} (appVersion: ${SHORT_SHA})"
+
+      - name: Package charts
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          # Bundled llmfit-dra dependency (Chart.lock) — resolve before packaging.
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm dependency build charts/sympozium
+          # Override the chart version so each main push produces a unique
+          # OCI tag (Flux needs a stable, monotonically-rising version).
+          # appVersion carries the short SHA so `kubectl describe helmrelease`
+          # shows which commit the cluster is running.
+          helm package charts/sympozium-crds \
+            --version "${VERSION}" --app-version "${SHORT_SHA}" \
+            --destination .helm-packages
+          helm package charts/sympozium \
+            --version "${VERSION}" --app-version "${SHORT_SHA}" \
+            --destination .helm-packages
+
+      - name: Push charts to GHCR OCI
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          helm push .helm-packages/sympozium-crds-${VERSION}.tgz oci://ghcr.io/velatir
+          # The sympozium chart is published under the OCI package name
+          # `sympozium` (the Chart.yaml `name:` field). The packaged .tgz
+          # uses the chart name as the basename, so the file is
+          # `sympozium-${VERSION}.tgz`. Pushed to oci://ghcr.io/velatir,
+          # which lands at ghcr.io/velatir/sympozium:${VERSION}.
+          helm push .helm-packages/sympozium-${VERSION}.tgz oci://ghcr.io/velatir
+
+      - name: Notify velatir-infrastructure (dev only)
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.VELATIR_INFRA_DISPATCH_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh api repos/velatir/velatir-infrastructure/dispatches \
+            -f event_type=velatir-sympozium-charts-main-pushed \
+            -f client_payload[version]="${VERSION}" \
+            -f client_payload[registry]=oci://ghcr.io/velatir \
+            -f client_payload[target]=dev
