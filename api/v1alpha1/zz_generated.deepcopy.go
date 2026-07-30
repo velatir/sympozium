@@ -172,7 +172,7 @@ func (in *AgentConfigSpec) DeepCopyInto(out *AgentConfigSpec) {
 	if in.Schedule != nil {
 		in, out := &in.Schedule, &out.Schedule
 		*out = new(AgentConfigSchedule)
-		**out = **in
+		(*in).DeepCopyInto(*out)
 	}
 	if in.Memory != nil {
 		in, out := &in.Memory, &out.Memory
@@ -3072,7 +3072,7 @@ func (in *SympoziumSchedule) DeepCopyInto(out *SympoziumSchedule) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
-	out.Spec = in.Spec
+	in.Spec.DeepCopyInto(&out.Spec)
 	in.Status.DeepCopyInto(&out.Status)
 }
 
