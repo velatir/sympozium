@@ -4917,7 +4917,7 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 			if sched.Spec.AgentRef == inst.Name {
 				m.editScheduleName = sched.Name
 				m.editHeartbeat.schedule = sched.Spec.Schedule
-				m.editHeartbeat.task = sched.Spec.Task
+				m.editHeartbeat.task = sched.Spec.Task.GetPrompt()
 				for j, t := range editScheduleTypes {
 					if t == sched.Spec.Type {
 						m.editHeartbeat.schedType = j
@@ -5029,7 +5029,7 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 		m.editField = 0
 		m.editHeartbeat = editHeartbeatForm{
 			schedule:      sched.Spec.Schedule,
-			task:          sched.Spec.Task,
+			task:          sched.Spec.Task.GetPrompt(),
 			includeMemory: sched.Spec.IncludeMemory,
 			suspend:       sched.Spec.Suspend,
 		}
@@ -5388,7 +5388,7 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 				Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 					AgentRef:          instName,
 					Schedule:          hb.schedule,
-					Task:              hb.task,
+					Task:              sympoziumv1alpha1.NewStringTask(hb.task),
 					Type:              schedType,
 					ConcurrencyPolicy: concPolicy,
 					IncludeMemory:     hb.includeMemory,

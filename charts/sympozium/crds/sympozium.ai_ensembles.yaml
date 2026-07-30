@@ -603,7 +603,6 @@ spec:
                                 Semantics are mode-specific (the handler decides). For sidecar-driven
                                 mode this is required and identifies the sidecar's primary tool.
                               type: string
-                          type: object
                           x-kubernetes-preserve-unknown-fields: true
                         type:
                           default: heartbeat

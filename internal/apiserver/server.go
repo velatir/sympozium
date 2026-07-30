@@ -756,7 +756,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 				AgentRef:          req.Name,
 				Schedule:          cron,
-				Task:              "heartbeat",
+				Task:              sympoziumv1alpha1.NewStringTask("heartbeat"),
 				Type:              "heartbeat",
 				ConcurrencyPolicy: "Forbid",
 				IncludeMemory:     true,
