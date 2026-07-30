@@ -344,6 +344,7 @@ type AgentConfigSchedule struct {
 	// dropped — there is no canonical way to prepend a free-form string to
 	// a per-mode object. Users who need both should embed the directive
 	// in the parameters of the object form.
+	// +kubebuilder:validation:Schemaless
 	// +kubebuilder:validation:XPreserveUnknownFields
 	Task *TaskSpec `json:"task"`
 

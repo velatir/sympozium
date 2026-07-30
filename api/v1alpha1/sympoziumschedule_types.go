@@ -16,6 +16,7 @@ type SympoziumScheduleSpec struct {
 	// trigger. Mirrors AgentRunSpec.Task — string form (Path A: the LLM
 	// prompt) or object form (Path B: orchestration mode + parameters
 	// dispatched by the controller's TaskModeHandler registry).
+	// +kubebuilder:validation:Schemaless
 	// +kubebuilder:validation:XPreserveUnknownFields
 	Task *TaskSpec `json:"task"`
 
