@@ -8926,7 +8926,7 @@ func tuiCreateSchedule(ns, instanceName, cronExpr, task string) (string, error) 
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef:      instanceName,
 			Schedule:      cronExpr,
-			Task:          task,
+			Task:          sympoziumv1alpha1.NewStringTask(task),
 			Type:          "scheduled",
 			IncludeMemory: true,
 		},
@@ -11277,7 +11277,7 @@ func tuiOnboardApply(ns string, w *wizardState) (string, error) {
 			Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 				AgentRef:          w.instanceName,
 				Schedule:          heartbeatCron,
-				Task:              onboardHeartbeatTask(w.teamTask),
+				Task:              sympoziumv1alpha1.NewStringTask(onboardHeartbeatTask(w.teamTask)),
 				Type:              "heartbeat",
 				ConcurrencyPolicy: "Forbid",
 				IncludeMemory:     true,
