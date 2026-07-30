@@ -123,7 +123,7 @@ func (sr *ScheduleRouter) createSchedule(ctx context.Context, namespace, name, i
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef:          instanceName,
 			Schedule:          req.Schedule,
-			Task:              req.Task,
+			Task:              sympoziumv1alpha1.NewStringTask(req.Task),
 			Type:              "heartbeat",
 			ConcurrencyPolicy: "Forbid",
 			IncludeMemory:     true,
@@ -163,7 +163,7 @@ func (sr *ScheduleRouter) updateSchedule(ctx context.Context, namespace, name st
 		existing.Spec.Schedule = req.Schedule
 	}
 	if req.Task != "" {
-		existing.Spec.Task = req.Task
+		existing.Spec.Task = sympoziumv1alpha1.NewStringTask(req.Task)
 	}
 	// Ensure it's not suspended when updating.
 	existing.Spec.Suspend = false

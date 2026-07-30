@@ -821,17 +821,33 @@ func (r *EnsembleReconciler) buildSchedule(
 	}
 }
 
-// buildScheduleTask constructs the task string for a persona's schedule.
-// If the pack has a TaskOverride, it prepends the team-level directive.
+// buildScheduleTask constructs the polymorphic Task for a persona's
+// schedule. If the pack has a TaskOverride and the persona's task is a
+// string (Path A), the director directive is prepended to the prompt.
+// Object-form tasks (Path B) are passed through unchanged — there is no
+// canonical way to prepend a free-form directive to a per-mode object, so
+// the directive is silently dropped for object form. Users who need both
+// should embed the directive in the parameters of the object form.
 func (r *EnsembleReconciler) buildScheduleTask(
 	pack *sympoziumv1alpha1.Ensemble,
 	persona *sympoziumv1alpha1.AgentConfigSpec,
-) string {
+) *sympoziumv1alpha1.TaskSpec {
 	base := persona.Schedule.Task
-	if pack.Spec.TaskOverride != "" {
-		return fmt.Sprintf("TEAM OBJECTIVE: %s\n\nYOUR ROLE TASK: %s", pack.Spec.TaskOverride, base)
+	if base == nil {
+		return nil
 	}
-	return base
+	if pack.Spec.TaskOverride == "" {
+		return base
+	}
+	// Only string-form tasks can host a prepended directive. Object-form
+	// tasks are passed through unchanged; the directive would be impossible
+	// to interpret at the handler layer.
+	if !base.IsString() {
+		return base
+	}
+	return sympoziumv1alpha1.NewStringTask(
+		fmt.Sprintf("TEAM OBJECTIVE: %s\n\nYOUR ROLE TASK: %s", pack.Spec.TaskOverride, base.GetPrompt()),
+	)
 }
 
 // reconcileMemorySeeds creates or patches the memory ConfigMap with seed data.

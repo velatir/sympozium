@@ -329,8 +329,24 @@ type AgentConfigSchedule struct {
 	// +optional
 	Cron string `json:"cron,omitempty"`
 
-	// Task is the task description sent to the agent on each trigger.
-	Task string `json:"task"`
+	// Task is the polymorphic task description sent to the agent on each
+	// trigger. It accepts either a string (legacy Path A: the prompt passed
+	// to the LLM via the TASK env var) or an object describing an
+	// orchestration mode (e.g. {mode: "sidecar-driven", tool: "...",
+	// parameters: {...}}). The AgentRun's controller dispatches by the
+	// mode field for object form. Mirrors AgentRunSpec.Task — the
+	// polymorphic spec lives on the leaf CRD so the same TaskModeHandler
+	// registry can dispatch schedules-created AgentRuns identically.
+	//
+	// When TaskOverride is set on the Ensemble this Task is prepended with
+	// the team-level directive (string form only). Object form is passed
+	// through unchanged; with TaskOverride set, the directive is silently
+	// dropped — there is no canonical way to prepend a free-form string to
+	// a per-mode object. Users who need both should embed the directive
+	// in the parameters of the object form.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:XPreserveUnknownFields
+	Task *TaskSpec `json:"task"`
 
 	// FirstTick controls whether a newly created schedule runs straight away.
 	// "immediate" (default): the first tick is treated as already due, so the

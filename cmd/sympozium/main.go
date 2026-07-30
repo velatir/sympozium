@@ -4917,7 +4917,7 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 			if sched.Spec.AgentRef == inst.Name {
 				m.editScheduleName = sched.Name
 				m.editHeartbeat.schedule = sched.Spec.Schedule
-				m.editHeartbeat.task = sched.Spec.Task
+				m.editHeartbeat.task = sched.Spec.Task.GetPrompt()
 				for j, t := range editScheduleTypes {
 					if t == sched.Spec.Type {
 						m.editHeartbeat.schedType = j
@@ -5029,7 +5029,7 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 		m.editField = 0
 		m.editHeartbeat = editHeartbeatForm{
 			schedule:      sched.Spec.Schedule,
-			task:          sched.Spec.Task,
+			task:          sched.Spec.Task.GetPrompt(),
 			includeMemory: sched.Spec.IncludeMemory,
 			suspend:       sched.Spec.Suspend,
 		}
@@ -5368,7 +5368,7 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 				return cmdResultMsg{err: fmt.Errorf("get schedule %q: %w", schedName, err)}
 			}
 			sched.Spec.Schedule = hb.schedule
-			sched.Spec.Task = hb.task
+			sched.Spec.Task = sympoziumv1alpha1.NewStringTask(hb.task)
 			sched.Spec.Type = schedType
 			sched.Spec.ConcurrencyPolicy = concPolicy
 			sched.Spec.IncludeMemory = hb.includeMemory
@@ -5388,7 +5388,7 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 				Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 					AgentRef:          instName,
 					Schedule:          hb.schedule,
-					Task:              hb.task,
+					Task:              sympoziumv1alpha1.NewStringTask(hb.task),
 					Type:              schedType,
 					ConcurrencyPolicy: concPolicy,
 					IncludeMemory:     hb.includeMemory,
@@ -8926,7 +8926,7 @@ func tuiCreateSchedule(ns, instanceName, cronExpr, task string) (string, error) 
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef:      instanceName,
 			Schedule:      cronExpr,
-			Task:          task,
+			Task:          sympoziumv1alpha1.NewStringTask(task),
 			Type:          "scheduled",
 			IncludeMemory: true,
 		},
@@ -11277,7 +11277,7 @@ func tuiOnboardApply(ns string, w *wizardState) (string, error) {
 			Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 				AgentRef:          w.instanceName,
 				Schedule:          heartbeatCron,
-				Task:              onboardHeartbeatTask(w.teamTask),
+				Task:              sympoziumv1alpha1.NewStringTask(onboardHeartbeatTask(w.teamTask)),
 				Type:              "heartbeat",
 				ConcurrencyPolicy: "Forbid",
 				IncludeMemory:     true,
