@@ -1066,8 +1066,8 @@ func (r *AgentRunReconciler) triggerSequentialSuccessors(ctx context.Context, lo
 		// distinguish what happened from what it should do next.
 		targetTask := ""
 		for _, p := range ensemble.Spec.AgentConfigs {
-			if p.Name == targetPersona && p.Schedule != nil && p.Schedule.Task != "" {
-				targetTask = p.Schedule.Task
+			if p.Name == targetPersona && p.Schedule != nil && p.Schedule.Task != nil {
+				targetTask = p.Schedule.Task.GetPrompt()
 				break
 			}
 		}
@@ -1352,8 +1352,8 @@ func (r *AgentRunReconciler) triggerDelegationSuccessors(ctx context.Context, lo
 		// Build a structured handoff card carrying the source's result forward.
 		targetTask := ""
 		for _, p := range ensemble.Spec.AgentConfigs {
-			if p.Name == targetPersona && p.Schedule != nil && p.Schedule.Task != "" {
-				targetTask = p.Schedule.Task
+			if p.Name == targetPersona && p.Schedule != nil && p.Schedule.Task != nil {
+				targetTask = p.Schedule.Task.GetPrompt()
 				break
 			}
 		}

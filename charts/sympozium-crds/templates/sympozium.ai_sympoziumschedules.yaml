@@ -97,9 +97,35 @@ spec:
                 description: Suspend pauses scheduling when true.
                 type: boolean
               task:
-                description: Task is the task description sent to the agent on each
-                  trigger.
-                type: string
+                description: |-
+                  Task is the polymorphic task description sent to the agent on each
+                  trigger. Mirrors AgentRunSpec.Task — string form (Path A: the LLM
+                  prompt) or object form (Path B: orchestration mode + parameters
+                  dispatched by the controller's TaskModeHandler registry).
+                properties:
+                  mode:
+                    description: |-
+                      Mode is the orchestration mode identifier for object form. The
+                      controller looks up the matching TaskModeHandler in its registry.
+                      Examples: "sidecar-driven".
+                    type: string
+                  parameters:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Parameters is the open shape of arguments to pass to the orchestrator.
+                      Each handler decides how to interpret them. For sidecar-driven mode
+                      the controller serialises them to JSON and sets the
+                      SYMPOZIUM_RUN_CONFIG_JSON env var on the resolved sidecar.
+                    type: object
+                  tool:
+                    description: |-
+                      Tool is the SkillPack tool name to invoke on the resolved sidecar.
+                      Semantics are mode-specific (the handler decides). For sidecar-driven
+                      mode this is required and identifies the sidecar's primary tool.
+                    type: string
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
               type:
                 default: scheduled
                 description: 'Type categorises the schedule: heartbeat, scheduled,

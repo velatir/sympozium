@@ -12,8 +12,12 @@ type SympoziumScheduleSpec struct {
 	// Schedule is a cron expression (e.g. "0 * * * *").
 	Schedule string `json:"schedule"`
 
-	// Task is the task description sent to the agent on each trigger.
-	Task string `json:"task"`
+	// Task is the polymorphic task description sent to the agent on each
+	// trigger. Mirrors AgentRunSpec.Task — string form (Path A: the LLM
+	// prompt) or object form (Path B: orchestration mode + parameters
+	// dispatched by the controller's TaskModeHandler registry).
+	// +kubebuilder:validation:XPreserveUnknownFields
+	Task *TaskSpec `json:"task"`
 
 	// Type categorises the schedule: heartbeat, scheduled, or sweep.
 	// +kubebuilder:validation:Enum=heartbeat;scheduled;sweep

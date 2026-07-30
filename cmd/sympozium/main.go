@@ -5368,7 +5368,7 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 				return cmdResultMsg{err: fmt.Errorf("get schedule %q: %w", schedName, err)}
 			}
 			sched.Spec.Schedule = hb.schedule
-			sched.Spec.Task = hb.task
+			sched.Spec.Task = sympoziumv1alpha1.NewStringTask(hb.task)
 			sched.Spec.Type = schedType
 			sched.Spec.ConcurrencyPolicy = concPolicy
 			sched.Spec.IncludeMemory = hb.includeMemory

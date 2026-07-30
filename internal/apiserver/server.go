@@ -1465,7 +1465,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef: req.AgentRef,
 			Schedule: req.Schedule,
-			Task:     req.Task,
+			Task:     sympoziumv1alpha1.NewStringTask(req.Task),
 			Suspend:  req.Suspend,
 		},
 	}
@@ -1542,7 +1542,7 @@ func (s *Server) patchSchedule(w http.ResponseWriter, r *http.Request) {
 		sched.Spec.Schedule = *req.Schedule
 	}
 	if req.Task != nil {
-		sched.Spec.Task = *req.Task
+		sched.Spec.Task = sympoziumv1alpha1.NewStringTask(*req.Task)
 	}
 	if req.Type != nil {
 		sched.Spec.Type = *req.Type
