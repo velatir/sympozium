@@ -94,16 +94,20 @@ func newOpenAIProvider(provider, apiKey, baseURL, model, systemPrompt, task stri
 		}))
 	}
 
+	seed := []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage(systemPrompt),
+	}
+	if task != "" {
+		seed = append(seed, openai.UserMessage(task))
+	}
+
 	p := &openaiProvider{
 		client:      openai.NewClient(opts...),
 		provider:    provider,
 		model:       model,
 		system:      systemPrompt,
 		initialTask: task,
-		messages: []openai.ChatCompletionMessageParamUnion{
-			openai.SystemMessage(systemPrompt),
-			openai.UserMessage(task),
-		},
+		messages:   seed,
 		tools:      oaiTools,
 		toolsBytes: jsonBytes(oaiTools),
 	}
@@ -260,7 +264,9 @@ func (p *openaiProvider) ReplaceToolResults(replacements map[string]string) {
 func (p *openaiProvider) ResetContext() {
 	p.messages = []openai.ChatCompletionMessageParamUnion{
 		openai.SystemMessage(p.system),
-		openai.UserMessage(p.initialTask),
+	}
+	if p.initialTask != "" {
+		p.messages = append(p.messages, openai.UserMessage(p.initialTask))
 	}
 }
 
