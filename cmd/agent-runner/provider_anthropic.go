@@ -65,9 +65,9 @@ func newAnthropicProvider(apiKey, baseURL, model, systemPrompt, task string, too
 		model:       model,
 		system:      systemPrompt,
 		initialTask: task,
-		messages:   seed,
-		tools:      anthropicTools,
-		toolsBytes: jsonBytes(anthropicTools),
+		messages:    seed,
+		tools:       anthropicTools,
+		toolsBytes:  jsonBytes(anthropicTools),
 	}
 }
 

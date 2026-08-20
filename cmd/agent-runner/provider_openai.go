@@ -107,9 +107,9 @@ func newOpenAIProvider(provider, apiKey, baseURL, model, systemPrompt, task stri
 		model:       model,
 		system:      systemPrompt,
 		initialTask: task,
-		messages:   seed,
-		tools:      oaiTools,
-		toolsBytes: jsonBytes(oaiTools),
+		messages:    seed,
+		tools:       oaiTools,
+		toolsBytes:  jsonBytes(oaiTools),
 	}
 	return p, nil
 }
