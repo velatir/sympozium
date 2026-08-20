@@ -533,7 +533,7 @@ func (r *SympoziumConfigReconciler) buildCanaryEnsemble(config *sympoziumv1alpha
 		Schedule: &sympoziumv1alpha1.AgentConfigSchedule{
 			Type:     "heartbeat",
 			Interval: interval,
-			Task:     "canary",
+			Task:     sympoziumv1alpha1.NewStringTask("canary"),
 		},
 	}
 

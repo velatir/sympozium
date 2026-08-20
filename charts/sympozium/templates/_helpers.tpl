@@ -48,9 +48,15 @@ Chart name and version.
 
 {{/*
 Image tag helper — defaults to Chart.AppVersion.
+
+Upstream sympozium-ai/sympozium tags images with a `v` prefix
+(e.g. `v0.10.43`), and this helper preserved that. The Velatir fork's
+build workflow tags images as plain SHAs (e.g. `03936f4`), so the `v`
+prefix produces a tag (`v03936f4`) that doesn't exist in the registry
+(404 on ImagePullBackOff). Use Chart.AppVersion verbatim.
 */}}
 {{- define "sympozium.imageTag" -}}
-{{- .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}
+{{- .Values.image.tag | default .Chart.AppVersion }}
 {{- end }}
 
 {{/*

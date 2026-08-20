@@ -63,7 +63,7 @@ func TestSympoziumScheduleReconcile_CopiesProviderAndAuthSecretToRun(t *testing.
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef: "inst-a",
 			Schedule: "* * * * *",
-			Task:     "heartbeat",
+			Task:     sympoziumv1alpha1.NewStringTask("heartbeat"),
 			Type:     "heartbeat",
 		},
 	}
@@ -153,7 +153,7 @@ func TestSympoziumScheduleReconcile_FiltersWebEndpointSkill(t *testing.T) {
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef: "inst-web",
 			Schedule: "* * * * *",
-			Task:     "heartbeat",
+			Task:     sympoziumv1alpha1.NewStringTask("heartbeat"),
 			Type:     "heartbeat",
 		},
 	}
@@ -251,7 +251,7 @@ func TestSympoziumScheduleReconcile_SkipsWhenServingRunExists(t *testing.T) {
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef: "inst-serving",
 			Schedule: "* * * * *",
-			Task:     "heartbeat",
+			Task:     sympoziumv1alpha1.NewStringTask("heartbeat"),
 			Type:     "heartbeat",
 		},
 	}
@@ -315,7 +315,7 @@ func TestSympoziumScheduleReconcile_UnreachableCronDoesNotFire(t *testing.T) {
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef: "inst-unreachable",
 			Schedule: "0 0 31 2 *",
-			Task:     "discovery",
+			Task:     sympoziumv1alpha1.NewStringTask("discovery"),
 			Type:     "scheduled",
 		},
 	}
@@ -364,7 +364,7 @@ func TestSympoziumScheduleReconcile_ResolvesProviderFromSecretNameFallback(t *te
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef: "inst-b",
 			Schedule: "* * * * *",
-			Task:     "heartbeat",
+			Task:     sympoziumv1alpha1.NewStringTask("heartbeat"),
 			Type:     "heartbeat",
 		},
 	}
@@ -423,7 +423,7 @@ func pipelineScheduleFixtures(now time.Time) (*sympoziumv1alpha1.Agent, *sympozi
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef: "pipe-head",
 			Schedule: "* * * * *",
-			Task:     "kick off pipeline",
+			Task:     sympoziumv1alpha1.NewStringTask("kick off pipeline"),
 			Type:     "sweep",
 		},
 	}
@@ -521,7 +521,7 @@ func TestSympoziumScheduleReconcile_PersistsRunTimeout(t *testing.T) {
 		Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 			AgentRef: "inst-slow",
 			Schedule: "* * * * *",
-			Task:     "sweep",
+			Task:     sympoziumv1alpha1.NewStringTask("sweep"),
 			Type:     "sweep",
 		},
 	}
@@ -593,7 +593,7 @@ func TestSympoziumScheduleReconcile_ForbidBlocksOnNonTerminalPhases(t *testing.T
 				Spec: sympoziumv1alpha1.SympoziumScheduleSpec{
 					AgentRef: "inst-forbid",
 					Schedule: "* * * * *",
-					Task:     "sweep",
+					Task:     sympoziumv1alpha1.NewStringTask("sweep"),
 					Type:     "sweep",
 					// The CRD defaults this to Forbid, but the fake client
 					// applies no defaulting, so set it explicitly.

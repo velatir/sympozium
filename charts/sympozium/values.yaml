@@ -1,6 +1,12 @@
 # -- Global image settings
+#
+# Velatir fork note (VEL-1173): this chart ships from velatir/sympozium and
+# defaults to the velatir image registry so Flux consumers don't need an
+# image-override ConfigMap. Override `image.registry` to pull from the
+# upstream `sympozium-ai/sympozium` registry if you want to use stock
+# Sympozium images instead of the Velatir fork.
 image:
-  registry: ghcr.io/sympozium-ai/sympozium
+  registry: ghcr.io/velatir/sympozium
   pullPolicy: IfNotPresent
   # -- Override the image tag (defaults to .Chart.AppVersion)
   tag: ""

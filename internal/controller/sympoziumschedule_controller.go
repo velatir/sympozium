@@ -222,12 +222,19 @@ func (r *SympoziumScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
-	// Build the task, optionally including memory context.
+	// Build the task, optionally including memory context. IncludeMemory
+	// only applies to string-form tasks (Path A, where the LLM needs the
+	// in-context memory dump). Object-form tasks (Path B, sidecar-driven)
+	// are passed through unchanged — the orchestrator owns its own
+	// memory/context handling and there is no canonical way to embed a
+	// free-form memory dump into a per-mode parameters object.
 	task := schedule.Spec.Task
-	if schedule.Spec.IncludeMemory {
+	if schedule.Spec.IncludeMemory && task != nil && task.IsString() {
 		memoryContent := r.readMemoryConfigMap(ctx, schedule.Namespace, schedule.Spec.AgentRef)
 		if memoryContent != "" {
-			task = fmt.Sprintf("## Memory Context\n%s\n\n## Task\n%s", memoryContent, task)
+			task = sympoziumv1alpha1.NewStringTask(
+				fmt.Sprintf("## Memory Context\n%s\n\n## Task\n%s", memoryContent, task.GetPrompt()),
+			)
 		}
 	}
 
@@ -269,7 +276,7 @@ func (r *SympoziumScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		},
 		Spec: sympoziumv1alpha1.AgentRunSpec{
 			AgentRef: schedule.Spec.AgentRef,
-			Task:     sympoziumv1alpha1.NewStringTask(task),
+			Task:     task,
 			AgentID:  fmt.Sprintf("schedule-%s", schedule.Name),
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider: resolveProvider(instance),
