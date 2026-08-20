@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/agentedit"
 	"github.com/sympozium-ai/sympozium/internal/helmchart"
 )
 
@@ -1194,6 +1195,7 @@ func kubectlApplyStdin(yaml string) error {
 func newInstallCmd() *cobra.Command {
 	var imageTag string
 	var setValues []string
+	var enableHermeticWorkloads bool
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install Sympozium into the current Kubernetes cluster",
@@ -1204,13 +1206,27 @@ network policies, and default SkillPacks/Policies/Ensembles.
 Use --image-tag to override the container image tag, for example when
 you have sideloaded images into Kind with a custom tag.
 
-Use --set to override arbitrary Helm values (e.g. --set controller.replicas=2).`,
+Use --set to override arbitrary Helm values (e.g. --set controller.replicas=2).
+
+Use --enable-hermetic-workloads to opt into the Celln backend (spec.backend:
+"celln" on AgentRuns): hardware-isolated, single-task execution in a sealed
+KVM cell instead of a Kubernetes Job. This is off by default because it
+deploys a DaemonSet that installs a host-level dispatcher on KVM-capable
+nodes, running privileged with hostPID and a read-write mount of the host
+root filesystem — necessary to set up KVM on the host, but a materially
+different trust boundary than the rest of Sympozium's pods. See
+docs/concepts/celln-backend.md before enabling it.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if enableHermeticWorkloads {
+				setValues = append(setValues, "celln.enabled=true")
+			}
 			return runInstall(imageTag, setValues)
 		},
 	}
 	cmd.Flags().StringVar(&imageTag, "image-tag", "", "Override image tag (e.g. 'latest')")
 	cmd.Flags().StringArrayVar(&setValues, "set", nil, "Set Helm values (key=value, can be repeated)")
+	cmd.Flags().BoolVar(&enableHermeticWorkloads, "enable-hermetic-workloads", false,
+		"Opt into the Celln backend: hardware-isolated execution via a privileged host-installer DaemonSet on KVM-capable nodes")
 	return cmd
 }
 
@@ -1301,6 +1317,15 @@ func runInstall(imageTag string, setValues []string) error {
 		ver = "embedded"
 	}
 	fmt.Printf("  Installing Sympozium %s...\n", ver)
+	for _, kv := range setValues {
+		if kv == "celln.enabled=true" {
+			fmt.Println("  ⚠️  Hermetic workloads (Celln) enabled — this deploys a privileged,")
+			fmt.Println("      hostPID DaemonSet with a read-write mount of the host root")
+			fmt.Println("      filesystem on any node labeled celln.dev/kvm=true, to set up KVM")
+			fmt.Println("      host-side. See docs/concepts/celln-backend.md.")
+			break
+		}
+	}
 
 	// Load the embedded Helm chart.
 	ch, err := helmchart.Load()
@@ -5231,10 +5256,12 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 			if v, err := strconv.Atoi(mem.maxSizeKB); err == nil && v > 0 {
 				maxKB = v
 			}
-			inst.Spec.Memory = &sympoziumv1alpha1.MemorySpec{
-				Enabled:      mem.enabled,
-				MaxSizeKB:    maxKB,
-				SystemPrompt: mem.systemPrompt,
+			edit := agentedit.Edit{
+				Memory: &agentedit.MemoryEdit{
+					Enabled:      &mem.enabled,
+					MaxSizeKB:    &maxKB,
+					SystemPrompt: &mem.systemPrompt,
+				},
 			}
 
 			// Apply skill toggles to instance (include per-skill Params).
@@ -5250,7 +5277,7 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 					skillRefs = append(skillRefs, ref)
 				}
 			}
-			inst.Spec.Skills = skillRefs
+			edit.Skills = &skillRefs
 
 			// Apply channel toggles to instance.
 			var channelSpecs []sympoziumv1alpha1.ChannelSpec
@@ -5264,24 +5291,18 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 					})
 				}
 			}
-			inst.Spec.Channels = channelSpecs
+			edit.Channels = &channelSpecs
 
 			// Apply web endpoint toggle
+			we := &agentedit.WebEndpointEdit{Enabled: webEP.enabled}
 			if webEP.enabled {
-				rpm := 60
+				we.Hostname = webEP.hostname
+				we.RequestsPerMinute = 60
 				if v, err := strconv.Atoi(webEP.rateLimit); err == nil && v > 0 {
-					rpm = v
+					we.RequestsPerMinute = v
 				}
-				inst.Spec.WebEndpoint = &sympoziumv1alpha1.WebEndpointSpec{
-					Enabled:  true,
-					Hostname: webEP.hostname,
-					RateLimit: &sympoziumv1alpha1.RateLimitSpec{
-						RequestsPerMinute: rpm,
-					},
-				}
-			} else {
-				inst.Spec.WebEndpoint = nil
 			}
+			edit.WebEndpoint = we
 
 			// Apply lifecycle hooks.
 			lcForm := lifecycle
@@ -5312,13 +5333,23 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 					})
 				}
 				lh.RBAC = lifecycleRBACFromString(lcForm.rbac)
-				inst.Spec.Agents.Default.Lifecycle = lh
+				edit.Lifecycle = &lh
 			} else {
-				inst.Spec.Agents.Default.Lifecycle = nil
+				var none *sympoziumv1alpha1.LifecycleHooks
+				edit.Lifecycle = &none
 			}
 
-			if err := k8sClient.Update(ctx, &inst); err != nil {
+			// Route the edit: for an ensemble-managed Agent it lands on the
+			// Ensemble's agent config and flows back down, rather than being
+			// written to the Agent and reverted on the next reconcile.
+			target, err := agentedit.Apply(ctx, k8sClient, &inst, edit)
+			if err != nil {
 				return cmdResultMsg{err: fmt.Errorf("update instance %q: %w", instName, err)}
+			}
+			if target.Kind == "Ensemble" {
+				// Target.String() reports whether anything was written and whether
+				// the agent has picked it up yet.
+				msgs = append(msgs, fmt.Sprintf("Applied via %s", target))
 			}
 			updateParts := []string{"memory"}
 			if len(skills) > 0 {
@@ -8849,16 +8880,17 @@ func tuiAddChannel(ns, instanceName, chType, secretName string) (string, error) 
 		}
 	}
 
-	inst.Spec.Channels = append(inst.Spec.Channels, sympoziumv1alpha1.ChannelSpec{
+	channels := append(inst.Spec.Channels, sympoziumv1alpha1.ChannelSpec{
 		Type: strings.ToLower(chType),
 		ConfigRef: sympoziumv1alpha1.SecretRef{
 			Secret: secretName,
 		},
 	})
-	if err := k8sClient.Update(ctx, &inst); err != nil {
+	target, err := agentedit.Apply(ctx, k8sClient, &inst, agentedit.Edit{Channels: &channels})
+	if err != nil {
 		return "", fmt.Errorf("update instance: %w", err)
 	}
-	return tuiSuccessStyle.Render(fmt.Sprintf("✓ Added %s channel to %s (secret: %s)", chType, instanceName, secretName)), nil
+	return tuiSuccessStyle.Render(fmt.Sprintf("✓ Added %s channel to %s (secret: %s) via %s", chType, instanceName, secretName, target)), nil
 }
 
 func tuiRemoveChannel(ns, instanceName, chType string) (string, error) {
@@ -8881,11 +8913,11 @@ func tuiRemoveChannel(ns, instanceName, chType string) (string, error) {
 		return "", fmt.Errorf("channel %q not found on instance %s", chType, instanceName)
 	}
 
-	inst.Spec.Channels = newChannels
-	if err := k8sClient.Update(ctx, &inst); err != nil {
+	target, err := agentedit.Apply(ctx, k8sClient, &inst, agentedit.Edit{Channels: &newChannels})
+	if err != nil {
 		return "", fmt.Errorf("update instance: %w", err)
 	}
-	return tuiSuccessStyle.Render(fmt.Sprintf("✓ Removed %s channel from %s", chType, instanceName)), nil
+	return tuiSuccessStyle.Render(fmt.Sprintf("✓ Removed %s channel from %s via %s", chType, instanceName, target)), nil
 }
 
 func tuiSetProvider(ns, instanceName, provider, model string) (string, error) {
@@ -8896,16 +8928,18 @@ func tuiSetProvider(ns, instanceName, provider, model string) (string, error) {
 	}
 
 	old := inst.Spec.Agents.Default.Model
-	inst.Spec.Agents.Default.Model = model
+	edit := agentedit.Edit{Model: &model}
 	// BaseURL is cleared when switching provider (user can set it separately with /baseurl).
 	if provider != "openai-compatible" {
-		inst.Spec.Agents.Default.BaseURL = ""
+		cleared := ""
+		edit.BaseURL = &cleared
 	}
 
-	if err := k8sClient.Update(ctx, &inst); err != nil {
+	target, err := agentedit.Apply(ctx, k8sClient, &inst, edit)
+	if err != nil {
 		return "", fmt.Errorf("update instance: %w", err)
 	}
-	return tuiSuccessStyle.Render(fmt.Sprintf("✓ Set %s provider=%s model=%s (was: %s)", instanceName, provider, model, old)), nil
+	return tuiSuccessStyle.Render(fmt.Sprintf("✓ Set %s provider=%s model=%s (was: %s) via %s", instanceName, provider, model, old, target)), nil
 }
 
 func tuiCreateSchedule(ns, instanceName, cronExpr, task string) (string, error) {
@@ -9052,11 +9086,11 @@ func tuiSetBaseURL(ns, instanceName, baseURL string) (string, error) {
 	if old == "" {
 		old = "(default)"
 	}
-	inst.Spec.Agents.Default.BaseURL = baseURL
-	if err := k8sClient.Update(ctx, &inst); err != nil {
+	target, err := agentedit.Apply(ctx, k8sClient, &inst, agentedit.Edit{BaseURL: &baseURL})
+	if err != nil {
 		return "", fmt.Errorf("update instance: %w", err)
 	}
-	return tuiSuccessStyle.Render(fmt.Sprintf("✓ Set %s baseURL=%s (was: %s)", instanceName, baseURL, old)), nil
+	return tuiSuccessStyle.Render(fmt.Sprintf("✓ Set %s baseURL=%s (was: %s) via %s", instanceName, baseURL, old, target)), nil
 }
 
 func tuiDeletePod(ns, podName string) (string, error) {

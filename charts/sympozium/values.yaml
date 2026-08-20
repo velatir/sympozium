@@ -132,6 +132,17 @@ pricing:
   # than editing the ConfigMap (Helm upgrades overwrite it).
   extraEntries: []
 
+# -- Persistent memory server
+memory:
+  # -- Admin-only DELETE /delete backstop for pruning corrupted or sensitive
+  # memory entries. When enabled, a bearer-token Secret is generated and the
+  # controller injects it into every memory-server pod (per-agent and shared
+  # workflow memory). The token is never exposed to agent pods. When disabled,
+  # the Secret is absent and /delete returns 403. Reach the endpoint via
+  # `kubectl port-forward` (RBAC-gated) with `Authorization: Bearer <token>`.
+  adminDelete:
+    enabled: true
+
 # -- CRD installation
 crds:
   # -- Install CRDs with the chart. Disable if managing CRDs separately.
@@ -364,6 +375,42 @@ agentSandbox:
   # -- Create RBAC rules allowing the controller to manage Sandbox, SandboxClaim,
   # and SandboxWarmPool CRs (apiGroup: agents.x-k8s.io).
   rbac: true
+
+# -- Celln hardware-isolated execution backend.
+# When enabled, the controller can dispatch AgentRuns with backend: "celln"
+# to a Celln router. The router forwards to host-level dispatchers which
+# execute tasks in sealed KVM cells.
+#
+# Requires: Celln router deployed (see celln repo integrations/kubernetes/)
+# and celln host dispatcher installed on each KVM node (scripts/setup-host.sh).
+celln:
+  # -- Enable the Celln backend. Opt-in and OFF by default: the installer
+  # DaemonSet runs privileged with hostPID and a read-write mount of the
+  # host root filesystem to perform KVM host setup, so turning this on is a
+  # deliberate choice, not a side effect of a routine install. When true,
+  # deploys the installer DaemonSet, router DaemonSet, and configures the
+  # controller for celln dispatch. The router forwards to the host
+  # dispatcher on localhost — no IP needed.
+  # `sympozium install --enable-hermetic-workloads` sets this for you.
+  enabled: false
+  # -- URL of the celln-router Service. The controller POSTs here.
+  routerUrl: "http://celln-router.celln-system.svc.cluster.local:8787"
+  # -- API key for your chosen LLM provider. Set ONE of these.
+  # The key file is mounted at /etc/celln/agent-key on the host dispatcher.
+  # If none are set, the dispatcher will use auto-discovery (ollama) or
+  # fail with a clear error message.
+  openaiApiKey: ""
+  anthropicApiKey: ""
+  deepseekApiKey: ""
+  # -- Optional: OpenAI-compatible base URL (for local/proxy servers).
+  openaiBaseUrl: ""
+  image:
+    repository: "ghcr.io/sympozium-ai/celln-installer"
+    tag: "v0.4.13"
+  router:
+    image:
+      repository: "ghcr.io/sympozium-ai/celln-router"
+      tag: "v0.4.13"
 
 # -- Persona delegation behavior.
 delegation:

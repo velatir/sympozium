@@ -190,6 +190,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run docs.yml
 
+<<<<<<< HEAD
   # ── Publish Helm chart to GHCR OCI registry (velatir consumers) ──────────────
   publish-helm-chart-oci:
     name: Publish Helm chart to GHCR OCI
@@ -244,10 +245,12 @@ jobs:
             -f client_payload[registry]=oci://ghcr.io/velatir
 
   # ── Update Homebrew tap (disabled — upstream-only) ───────────────────────────
+=======
+  # ── Update Homebrew tap ──────────────────────────────────────────────────────
+>>>>>>> origin/main
   update-homebrew:
     name: Update Homebrew tap
     needs: release-cli
-    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tap

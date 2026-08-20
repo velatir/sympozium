@@ -3,6 +3,7 @@
 package system_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/agentedit"
 )
 
 func TestEnsembleCreatesAgents(t *testing.T) {
@@ -296,3 +298,140 @@ func TestEnsembleStimulusTriggerRejectsNoStimulus(t *testing.T) {
 		t.Errorf("trigger status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestAgentSpecHasNoServerSideDefaults guards the assumption the Ensemble update
+// path rests on.
+//
+// reconcileAgentConfig compares the *stored* Agent spec against buildAgent's
+// in-memory output and assigns the whole spec on any difference. That converges only
+// while the apiserver returns a spec byte-identical to what was submitted. A
+// +kubebuilder:default on an AgentSpec field buildAgent leaves zero would break it:
+// stored and desired then differ forever, and every reconcile issues a redundant
+// Update.
+//
+// Note on what this does NOT test, and why: resourceVersion is not a usable signal
+// here. The apiserver no-ops an Update that produces no net storage change, so the
+// redundant writes are invisible in resourceVersion and generate no watch events.
+// Asserting the round-trip directly is what catches the defaulting change, and it
+// names the offending field.
+//
+// The unit tests cannot cover this — the fake client applies no defaults.
+func TestAgentSpecHasNoServerSideDefaults(t *testing.T) {
+	ns := createTestNamespace(t)
+
+	// Mirrors the shape buildAgent produces: a few fields set, the rest zero. Any
+	// zero field the CRD defaults comes back populated.
+	submitted := sympoziumv1alpha1.AgentSpec{
+		DisplayName: "Analyst",
+		Agents: sympoziumv1alpha1.AgentsSpec{
+			Default: sympoziumv1alpha1.AgentConfig{
+				Model:   "gpt-4o",
+				BaseURL: "http://fake:1234/v1",
+			},
+		},
+		Skills: []sympoziumv1alpha1.SkillRef{{SkillPackRef: "memory"}},
+		Memory: &sympoziumv1alpha1.MemorySpec{Enabled: true, MaxSizeKB: 256},
+	}
+
+	agent := &sympoziumv1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "defaults-probe", Namespace: ns},
+		Spec:       *submitted.DeepCopy(),
+	}
+	if err := k8sClient.Create(testCtx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	// k8sClient is the manager's cached client, so the read has to wait for the
+	// informer rather than assuming write-then-read consistency.
+	var stored sympoziumv1alpha1.Agent
+	pollUntil(t, 10*time.Second, 200*time.Millisecond, func() bool {
+		return k8sClient.Get(testCtx, client.ObjectKey{Name: "defaults-probe", Namespace: ns}, &stored) == nil
+	})
+
+	want, err := json.MarshalIndent(submitted, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal submitted: %v", err)
+	}
+	got, err := json.MarshalIndent(stored.Spec, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal stored: %v", err)
+	}
+
+	if string(want) != string(got) {
+		t.Errorf("AgentSpec did not round-trip through the apiserver unchanged.\n"+
+			"submitted:\n%s\n\nstored:\n%s\n\n"+
+			"A field defaulted server-side but left zero by buildAgent makes "+
+			"reconcileAgentConfig's whole-spec comparison never converge, so every reconcile "+
+			"issues a redundant Update. Either have buildAgent set the same value, or drop the "+
+			"+kubebuilder:default.", want, got)
+	}
+}
+
+// TestAgentEditIsVisibleImmediately is the end-to-end claim behind the reconcile
+// wait: after agentedit.Apply returns, a read through the same client a UI uses
+// already shows the edit.
+//
+// Without the wait this races the controller. Both clients re-read the moment the
+// edit returns — the TUI refreshes on the result message, the web UI invalidates its
+// agents query — and would land on pre-edit values, then correct themselves seconds
+// later. The TUI seeds its edit form from that read, so a user reopening the form
+// could save stale values back over their own change.
+//
+// k8sClient is the manager's cached client, which is what makes this meaningful:
+// the assertion is that the informer has caught up too, not merely the apiserver.
+func TestAgentEditIsVisibleImmediately(t *testing.T) {
+	ns := createTestNamespace(t)
+	name := "ens-visible"
+	agentName := fmt.Sprintf("%s-analyst", name)
+
+	ensemble := &sympoziumv1alpha1.Ensemble{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: sympoziumv1alpha1.EnsembleSpec{
+			Enabled: true,
+			BaseURL: "http://fake:1234/v1",
+			AgentConfigs: []sympoziumv1alpha1.AgentConfigSpec{
+				{Name: "analyst", SystemPrompt: "You are an analyst.", Model: "gpt-4o"},
+			},
+		},
+	}
+	if err := k8sClient.Create(testCtx, ensemble); err != nil {
+		t.Fatalf("create ensemble: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, ensemble) })
+
+	var agent sympoziumv1alpha1.Agent
+	pollUntil(t, 15*time.Second, 200*time.Millisecond, func() bool {
+		return k8sClient.Get(testCtx, client.ObjectKey{Name: agentName, Namespace: ns}, &agent) == nil
+	})
+
+	target, err := agentedit.Apply(testCtx, k8sClient, &agent, agentedit.Edit{
+		Model: strPtr("gpt-4o-mini"),
+	})
+	if err != nil {
+		t.Fatalf("agentedit.Apply: %v", err)
+	}
+	if target.Kind != "Ensemble" {
+		t.Fatalf("edit went to %s, want the Ensemble — the agent is ensemble-managed", target)
+	}
+	if !target.Changed {
+		t.Fatal("Target.Changed = false, but the model was altered")
+	}
+	if !target.Observed {
+		t.Fatalf("Target.Observed = false: the agent did not pick the edit up within the wait. "+
+			"target = %s", target)
+	}
+
+	// The assertion that matters: no polling here. This is the read a UI performs
+	// the instant the edit returns.
+	var afterEdit sympoziumv1alpha1.Agent
+	if err := k8sClient.Get(testCtx, client.ObjectKey{Name: agentName, Namespace: ns}, &afterEdit); err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got := afterEdit.Spec.Agents.Default.Model; got != "gpt-4o-mini" {
+		t.Errorf("model = %q immediately after the edit, want gpt-4o-mini.\n"+
+			"The read raced the controller, which is what the reconcile wait exists to prevent.", got)
+	}
+}
+
+func strPtr(s string) *string { return &s }
