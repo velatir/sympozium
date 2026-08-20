@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/azure"
 	openaioption "github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
 )
@@ -27,6 +26,10 @@ type openaiProvider struct {
 	system      string // system prompt kept separately so ResetContext can rebuild
 	initialTask string // initial user turn (kept for ResetContext to restore)
 	tools       []openai.ChatCompletionToolUnionParam
+	// toolsBytes is the serialized size of the tool schemas, computed once
+	// because the tool set never changes after construction. It is the static
+	// half of the request that prefix caching is meant to cover.
+	toolsBytes int
 }
 
 // newOpenAIProvider constructs an openaiProvider with the given config.
@@ -48,11 +51,19 @@ func newOpenAIProvider(provider, apiKey, baseURL, model, systemPrompt, task stri
 		if baseURL == "" {
 			return nil, fmt.Errorf("Azure OpenAI requires MODEL_BASE_URL to be set")
 		}
+		if model == "" {
+			return nil, fmt.Errorf("Azure OpenAI requires MODEL_NAME to be set")
+		}
 		apiVersion := getEnv("AZURE_OPENAI_API_VERSION", "2024-06-01")
+		// azure.WithEndpoint path transform not applied in openai-go v3.22.0 — construct manually
+		deploymentURL := strings.TrimRight(baseURL, "/") + "/openai/deployments/" + model
 		opts = append(opts,
-			azure.WithEndpoint(baseURL, apiVersion),
-			azure.WithAPIKey(apiKey),
+			openaioption.WithBaseURL(deploymentURL),
+			openaioption.WithAPIKey(apiKey),
+			openaioption.WithHeader("Api-Key", apiKey),
 		)
+		// Add API version as query parameter for all requests
+		opts = append(opts, openaioption.WithQueryAdd("api-version", apiVersion))
 	default:
 		if apiKey != "" {
 			opts = append(opts, openaioption.WithAPIKey(apiKey))
@@ -93,7 +104,8 @@ func newOpenAIProvider(provider, apiKey, baseURL, model, systemPrompt, task stri
 			openai.SystemMessage(systemPrompt),
 			openai.UserMessage(task),
 		},
-		tools: oaiTools,
+		tools:      oaiTools,
+		toolsBytes: jsonBytes(oaiTools),
 	}
 	return p, nil
 }
@@ -110,7 +122,16 @@ func (p *openaiProvider) Chat(ctx context.Context) (ChatResult, error) {
 		params.Tools = p.tools
 	}
 
-	detailedLog.LogLLM("request", map[string]any{"provider": p.provider, "model": p.model, "messages_count": len(p.messages), "tools_count": len(p.tools)})
+	if detailedLog.Enabled() {
+		detailedLog.LogLLM("request", map[string]any{
+			"provider":       p.provider,
+			"model":          p.model,
+			"messages_count": len(p.messages),
+			"tools_count":    len(p.tools),
+			"tools_bytes":    p.toolsBytes,
+			"messages_bytes": jsonBytes(p.messages),
+		})
+	}
 	completion, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
 		var apiErr *openai.Error
@@ -150,10 +171,13 @@ func (p *openaiProvider) Chat(ctx context.Context) (ChatResult, error) {
 	}
 
 	result := ChatResult{
-		Text:         text,
-		InputTokens:  int(completion.Usage.PromptTokens),
-		OutputTokens: int(completion.Usage.CompletionTokens),
-		FinishReason: choice.FinishReason,
+		Text:        text,
+		InputTokens: int(completion.Usage.PromptTokens),
+		// OpenAI (and OpenRouter-proxied models) count cached tokens inside
+		// prompt_tokens, so this is a breakdown of InputTokens, not an addition.
+		CachedInputTokens: int(completion.Usage.PromptTokensDetails.CachedTokens),
+		OutputTokens:      int(completion.Usage.CompletionTokens),
+		FinishReason:      choice.FinishReason,
 	}
 
 	// Extract tool calls whenever present, regardless of finish_reason.
@@ -204,6 +228,28 @@ func (p *openaiProvider) Chat(ctx context.Context) (ChatResult, error) {
 func (p *openaiProvider) AddToolResults(results []ToolResult) {
 	for _, r := range results {
 		p.messages = append(p.messages, openai.ToolMessage(r.Content, r.CallID))
+	}
+}
+
+// ReplaceToolResults swaps the content of already-recorded tool messages,
+// keyed by tool_call_id. The message itself is rebuilt through the same
+// constructor so the tool_call_id linkage the API requires is preserved —
+// dropping the message outright would orphan the assistant's tool_calls entry
+// and the request would be rejected.
+func (p *openaiProvider) ReplaceToolResults(replacements map[string]string) {
+	if len(replacements) == 0 {
+		return
+	}
+	for i := range p.messages {
+		tm := p.messages[i].OfTool
+		if tm == nil {
+			continue
+		}
+		stub, ok := replacements[tm.ToolCallID]
+		if !ok {
+			continue
+		}
+		p.messages[i] = openai.ToolMessage(stub, tm.ToolCallID)
 	}
 }
 

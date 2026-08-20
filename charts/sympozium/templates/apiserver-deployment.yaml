@@ -50,6 +50,10 @@ spec:
                   fieldPath: spec.nodeName
             - name: SYMPOZIUM_COLLECTOR_METRICS_URL
               value: "http://sympozium-otel-collector.{{ include "sympozium.namespace" . }}.svc.cluster.local:{{ .Values.observability.collector.service.metricsPort }}/metrics"
+          {{- if .Values.celln.enabled }}
+            - name: CELLN_ROUTER_URL
+              value: {{ .Values.celln.routerUrl | quote }}
+          {{- end }}
           {{- if .Values.pricing.enabled }}
             - name: SYMPOZIUM_PRICING_CONFIGMAP
               value: "sympozium-model-pricing"
@@ -94,7 +98,12 @@ spec:
             {{- toYaml .Values.apiserver.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+<<<<<<< HEAD
           {{- if not .Values.apiserver.webUI.token }}
+=======
+          {{- /* Gate must match apiserver-ui-secret.yaml */}}
+          {{- if and .Values.apiserver.webUI.enabled (not .Values.apiserver.webUI.token) }}
+>>>>>>> origin/main
           volumeMounts:
             - name: sympozium-ui-token
               mountPath: /var/run/secrets/sympozium-ui-token

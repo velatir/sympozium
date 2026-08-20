@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -306,188 +307,67 @@ func (r *EnsembleReconciler) reconcileAgentConfig(
 	} else if err != nil {
 		return ip, fmt.Errorf("get instance %s: %w", instanceName, err)
 	} else {
-		// Update pack-level settings on existing instances — authRefs, model,
-		// and channels are owned by the pack, not per-instance configuration.
+		// The Ensemble is the source of truth for its Agents: build what the
+		// current pack/persona implies and assign the whole spec, rather than
+		// propagating field by field. A field added to buildAgent then reaches
+		// existing Agents with no change here — the field-by-field form had to be
+		// extended for each one and drifted behind buildAgent (see #264).
+		//
+		// AgentSpec carries no out-of-band state, so nothing is carried over from
+		// the existing object. Fields buildAgent never sets are cleared; they are
+		// listed in agentFieldsNotExpressibleByEnsemble in ensemble_parity_test.go.
+		desired := r.buildAgent(pack, persona, instanceName, modelEndpoint)
+
 		needsUpdate := false
+		specDrifted := !reflect.DeepEqual(existingInst.Spec, desired.Spec)
+		if specDrifted {
+			existingInst.Spec = desired.Spec
+			needsUpdate = true
+		}
 
-		// Propagate provider label.
-		wantProvider := persona.Provider
-		if existingInst.Labels["sympozium.ai/provider"] != wantProvider {
-			if wantProvider != "" {
-				existingInst.Labels["sympozium.ai/provider"] = wantProvider
-			} else {
+		// Labels merge rather than replace: other controllers and operators add
+		// their own keys, and only the ones buildAgent derives are ours to set.
+		// sympozium.ai/ensemble and sympozium.ai/agent-config in particular are how
+		// toolpolicy.ForAgent and the sharedMemory/relationshipContext pod mutators
+		// find their configuration, and all three fail open when a label is stale.
+		if existingInst.Labels == nil && len(desired.Labels) > 0 {
+			existingInst.Labels = map[string]string{}
+		}
+		for k, v := range desired.Labels {
+			if existingInst.Labels[k] != v {
+				existingInst.Labels[k] = v
+				needsUpdate = true
+			}
+		}
+		// buildAgent omits the provider label when persona.Provider is empty, so
+		// clear a stale one rather than leaving the old provider in place.
+		if persona.Provider == "" {
+			if _, ok := existingInst.Labels["sympozium.ai/provider"]; ok {
 				delete(existingInst.Labels, "sympozium.ai/provider")
-			}
-			needsUpdate = true
-		}
-
-		// Propagate authRefs changes (filtered by persona provider).
-		wantAuthRefs := resolveAuthRefs(pack, persona, modelEndpoint)
-		if !authRefsEqual(existingInst.Spec.AuthRefs, wantAuthRefs) {
-			existingInst.Spec.AuthRefs = wantAuthRefs
-			needsUpdate = true
-		}
-
-		// Propagate model changes (with same defaults as buildAgent).
-		wantModel := resolveModel(pack, persona, modelEndpoint)
-		if existingInst.Spec.Agents.Default.Model != wantModel {
-			existingInst.Spec.Agents.Default.Model = wantModel
-			needsUpdate = true
-		}
-
-		// Propagate baseURL changes (e.g. switching to/from a local provider).
-		wantBaseURL := resolveBaseURL(pack, persona, modelEndpoint)
-		if existingInst.Spec.Agents.Default.BaseURL != wantBaseURL {
-			existingInst.Spec.Agents.Default.BaseURL = wantBaseURL
-			needsUpdate = true
-		}
-
-		// Propagate persona systemPrompt changes so edits to the pack
-		// actually reach the running agents (otherwise a pack author
-		// can't tune agent behaviour without re-stamping instances).
-		if existingInst.Spec.Memory == nil {
-			existingInst.Spec.Memory = &sympoziumv1alpha1.MemorySpec{
-				Enabled:   true,
-				MaxSizeKB: 256,
-			}
-			needsUpdate = true
-		}
-		if existingInst.Spec.Memory.SystemPrompt != persona.SystemPrompt {
-			existingInst.Spec.Memory.SystemPrompt = persona.SystemPrompt
-			needsUpdate = true
-		}
-
-		// Propagate channel list changes from persona definition.
-		wantChannels := make(map[string]bool)
-		for _, ch := range persona.Channels {
-			wantChannels[ch] = true
-		}
-		haveChannels := make(map[string]bool)
-		for _, ch := range existingInst.Spec.Channels {
-			haveChannels[ch.Type] = true
-		}
-		if len(persona.Channels) > 0 && !channelSetsEqual(wantChannels, haveChannels) {
-			var channelSpecs []sympoziumv1alpha1.ChannelSpec
-			for _, ch := range persona.Channels {
-				channelSpecs = append(channelSpecs, sympoziumv1alpha1.ChannelSpec{Type: ch})
-			}
-			existingInst.Spec.Channels = channelSpecs
-			needsUpdate = true
-		}
-
-		// Always reconcile per-channel fields (ConfigRef, AccessControl,
-		// Triggers, Volumes, VolumeMounts) so edits to ensemble/persona
-		// channel configuration propagate without requiring agent recreation.
-		for i := range existingInst.Spec.Channels {
-			ch := &existingInst.Spec.Channels[i]
-			desired := buildChannelSpec(pack, persona, ch.Type)
-			if !reflect.DeepEqual(ch.ConfigRef, desired.ConfigRef) {
-				ch.ConfigRef = desired.ConfigRef
 				needsUpdate = true
 			}
-			if !reflect.DeepEqual(ch.AccessControl, desired.AccessControl) {
-				ch.AccessControl = desired.AccessControl
-				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.Triggers, desired.Triggers) {
-				ch.Triggers = desired.Triggers
-				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.Slack, desired.Slack) {
-				ch.Slack = desired.Slack
-				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.Volumes, desired.Volumes) {
-				ch.Volumes = desired.Volumes
-				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.VolumeMounts, desired.VolumeMounts) {
-				ch.VolumeMounts = desired.VolumeMounts
-				needsUpdate = true
-			}
-		}
-
-		// Propagate provider headers changes.
-		wantProviderHeaders := mergeProviderHeaders(pack.Spec.ProviderHeaders, persona.ProviderHeaders)
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.ProviderHeaders, wantProviderHeaders) {
-			existingInst.Spec.Agents.Default.ProviderHeaders = wantProviderHeaders
-			needsUpdate = true
-		}
-		wantHeadersSecretRef := resolveProviderHeadersSecretRef(pack, persona)
-		if existingInst.Spec.Agents.Default.ProviderHeadersSecretRef != wantHeadersSecretRef {
-			existingInst.Spec.Agents.Default.ProviderHeadersSecretRef = wantHeadersSecretRef
-			needsUpdate = true
-		}
-
-		if existingInst.Spec.Agents.Default.RunTimeout != persona.RunTimeout {
-			existingInst.Spec.Agents.Default.RunTimeout = persona.RunTimeout
-			needsUpdate = true
-		}
-
-		// Propagate env changes from persona definition.
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.Env, persona.Env) {
-			existingInst.Spec.Agents.Default.Env = persona.Env
-			needsUpdate = true
-		}
-
-		// Propagate skills changes from persona definition.
-		wantSkills := buildDesiredSkills(pack, persona)
-		if !skillRefsEqual(existingInst.Spec.Skills, wantSkills) {
-			existingInst.Spec.Skills = wantSkills
-			needsUpdate = true
-		}
-
-		// Propagate MCP server changes from persona definition.
-		if !mcpServerRefsEqual(existingInst.Spec.MCPServers, persona.MCPServers) {
-			existingInst.Spec.MCPServers = persona.MCPServers
-			needsUpdate = true
-		}
-
-		// Propagate subagent limits from persona definition so changes to
-		// maxDepth, maxConcurrent, or maxChildrenPerAgent reach existing Agents.
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.Subagents, persona.Subagents) {
-			existingInst.Spec.Agents.Default.Subagents = persona.Subagents
-			needsUpdate = true
-		}
-
-		// Propagate volumes from ensemble.
-		if !reflect.DeepEqual(existingInst.Spec.Volumes, pack.Spec.Volumes) {
-			existingInst.Spec.Volumes = pack.Spec.Volumes
-			needsUpdate = true
-		}
-
-		// Propagate volume mounts from ensemble.
-		if !reflect.DeepEqual(existingInst.Spec.VolumeMounts, pack.Spec.VolumeMounts) {
-			existingInst.Spec.VolumeMounts = pack.Spec.VolumeMounts
-			needsUpdate = true
-		}
-
-		// Propagate sandbox config from ensemble.
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.AgentSandbox, pack.Spec.AgentSandbox) {
-			existingInst.Spec.Agents.Default.AgentSandbox = pack.Spec.AgentSandbox
-			needsUpdate = true
-		}
-
-		// Propagate lifecycle from persona.
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.Lifecycle, persona.Lifecycle) {
-			existingInst.Spec.Agents.Default.Lifecycle = persona.Lifecycle
-			needsUpdate = true
-		}
-
-		// Propagate policy ref from ensemble.
-		if existingInst.Spec.PolicyRef != pack.Spec.PolicyRef {
-			existingInst.Spec.PolicyRef = pack.Spec.PolicyRef
-			needsUpdate = true
 		}
 
 		if needsUpdate {
-			log.Info("Updating pack-level settings on existing instance", "instance", instanceName)
+			// Say plainly when the spec is being replaced. An edit made directly to
+			// an ensemble-managed Agent — the TUI's agent-edit flow writes
+			// spec.webEndpoint and spec.memory.enabled this way — is reverted here,
+			// and without a log line that reads as "the setting doesn't stick".
+			// Configure it on the Ensemble's agentConfigs entry instead.
+			if specDrifted {
+				log.Info("Reverting out-of-band change to ensemble-managed Agent; the Ensemble is the source of truth",
+					"instance", instanceName,
+					"ensemble", pack.Name,
+					"agentConfig", persona.Name,
+					"hint", "edit spec.agentConfigs on the Ensemble rather than the Agent")
+			} else {
+				log.Info("Updating pack-level settings on existing instance", "instance", instanceName)
+			}
 			if err := r.Update(ctx, existingInst); err != nil {
 				return ip, fmt.Errorf("update instance %s: %w", instanceName, err)
 			}
 		}
 	}
-	// Instance is now up to date — users own other fields after creation.
 
 	// --- Memory seeds ---
 	if persona.Memory != nil && len(persona.Memory.Seeds) > 0 {
@@ -650,6 +530,17 @@ func resolveProviderHeadersSecretRef(pack *sympoziumv1alpha1.Ensemble, persona *
 	return ref
 }
 
+// resolveAutoStoreMemory computes the effective memory AutoStore setting for a
+// generated agent. A per-agent-config override (AgentConfigMemory.AutoStore)
+// wins; otherwise the ensemble-level default (AutoStoreMemory) applies. Nil at
+// both levels leaves the field unset, so the Agent defaults to enabled.
+func resolveAutoStoreMemory(pack *sympoziumv1alpha1.Ensemble, persona *sympoziumv1alpha1.AgentConfigSpec) *bool {
+	if persona.Memory != nil && persona.Memory.AutoStore != nil {
+		return persona.Memory.AutoStore
+	}
+	return pack.Spec.AutoStoreMemory
+}
+
 // buildAgent creates a Agent spec from a persona definition.
 func (r *EnsembleReconciler) buildAgent(
 	pack *sympoziumv1alpha1.Ensemble,
@@ -660,6 +551,7 @@ func (r *EnsembleReconciler) buildAgent(
 	model := resolveModel(pack, persona, modelEndpoint)
 	authRefs := resolveAuthRefs(pack, persona, modelEndpoint)
 	baseURL := resolveBaseURL(pack, persona, modelEndpoint)
+	autoStore := resolveAutoStoreMemory(pack, persona)
 
 	// Merge provider headers: ensemble-level base, persona-level overrides.
 	providerHeaders := mergeProviderHeaders(pack.Spec.ProviderHeaders, persona.ProviderHeaders)
@@ -671,6 +563,17 @@ func (r *EnsembleReconciler) buildAgent(
 	}
 	if persona.Provider != "" {
 		labels["sympozium.ai/provider"] = persona.Provider
+	}
+
+	// Memory settings come from the agent config when it declares them. Absent a
+	// memory block the historical defaults apply, so ensembles written before
+	// these fields existed render exactly as before.
+	memoryEnabled, memoryMaxSizeKB := true, 256
+	if persona.Memory != nil {
+		memoryEnabled = persona.Memory.Enabled
+		if persona.Memory.MaxSizeKB > 0 {
+			memoryMaxSizeKB = persona.Memory.MaxSizeKB
+		}
 	}
 
 	inst := &sympoziumv1alpha1.Agent{
@@ -696,8 +599,9 @@ func (r *EnsembleReconciler) buildAgent(
 			},
 			AuthRefs: authRefs,
 			Memory: &sympoziumv1alpha1.MemorySpec{
-				Enabled:      true,
-				MaxSizeKB:    256,
+				Enabled:      memoryEnabled,
+				MaxSizeKB:    memoryMaxSizeKB,
+				AutoStore:    autoStore,
 				SystemPrompt: persona.SystemPrompt,
 			},
 			Observability: defaultObservabilitySpec(),
@@ -706,36 +610,10 @@ func (r *EnsembleReconciler) buildAgent(
 		},
 	}
 
-	// Skills — skip "mcp-bridge" which is a sidecar marker, not a SkillPack.
-	for _, s := range persona.Skills {
-		if s == "mcp-bridge" {
-			continue
-		}
-		ref := sympoziumv1alpha1.SkillRef{
-			SkillPackRef: s,
-		}
-		// Apply pack-level skill params if configured (e.g. repo for github-gitops).
-		if pack.Spec.SkillParams != nil {
-			if params, ok := pack.Spec.SkillParams[s]; ok && len(params) > 0 {
-				ref.Params = params
-			}
-		}
-		inst.Spec.Skills = append(inst.Spec.Skills, ref)
-	}
-
-	// Ensure memory skill is always attached.
-	hasMemory := false
-	for _, s := range inst.Spec.Skills {
-		if s.SkillPackRef == "memory" {
-			hasMemory = true
-			break
-		}
-	}
-	if !hasMemory {
-		inst.Spec.Skills = append(inst.Spec.Skills, sympoziumv1alpha1.SkillRef{
-			SkillPackRef: "memory",
-		})
-	}
+	// Skills — including the mcp-bridge skip, the always-attached memory skill,
+	// and the web-endpoint skill. Shared with nothing else now, but kept in
+	// buildDesiredSkills so skill derivation has a single definition.
+	inst.Spec.Skills = buildDesiredSkills(pack, persona)
 
 	// Channels
 	for _, ch := range persona.Channels {
@@ -748,18 +626,6 @@ func (r *EnsembleReconciler) buildAgent(
 
 	// Policy — use the pack's policy ref if set.
 	inst.Spec.PolicyRef = pack.Spec.PolicyRef
-
-	// Web endpoint — add the web-endpoint skill instead of the legacy field.
-	if persona.WebEndpoint != nil && persona.WebEndpoint.Enabled {
-		params := map[string]string{}
-		if persona.WebEndpoint.Hostname != "" {
-			params["hostname"] = persona.WebEndpoint.Hostname
-		}
-		inst.Spec.Skills = append(inst.Spec.Skills, sympoziumv1alpha1.SkillRef{
-			SkillPackRef: "web-endpoint",
-			Params:       params,
-		})
-	}
 
 	return inst
 }
@@ -1049,19 +915,6 @@ func (r *EnsembleReconciler) reconcileDelete(
 	return ctrl.Result{}, nil
 }
 
-// authRefsEqual returns true if two SecretRef slices are equivalent.
-func authRefsEqual(a, b []sympoziumv1alpha1.SecretRef) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Provider != b[i].Provider || a[i].Secret != b[i].Secret {
-			return false
-		}
-	}
-	return true
-}
-
 // mergeProviderHeaders merges ensemble-level and persona-level provider headers.
 // Persona keys take precedence on collision. Returns nil if both inputs are empty.
 func mergeProviderHeaders(ensembleHeaders, personaHeaders map[string]string) map[string]string {
@@ -1078,28 +931,17 @@ func mergeProviderHeaders(ensembleHeaders, personaHeaders map[string]string) map
 	return merged
 }
 
-// channelSetsEqual returns true if two channel sets contain the same types.
-func channelSetsEqual(a, b map[string]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if !b[k] {
-			return false
-		}
-	}
-	return true
-}
-
 // buildChannelSpec computes the desired ChannelSpec for a given channel type
 // from pack and persona configuration. Persona-level overrides take priority
 // over ensemble-level defaults for AccessControl and Triggers.
 func buildChannelSpec(pack *sympoziumv1alpha1.Ensemble, persona *sympoziumv1alpha1.AgentConfigSpec, ch string) sympoziumv1alpha1.ChannelSpec {
 	cs := sympoziumv1alpha1.ChannelSpec{Type: ch}
-	if pack.Spec.ChannelConfigs != nil {
-		if secretName, ok := pack.Spec.ChannelConfigs[ch]; ok && secretName != "" {
-			cs.ConfigRef = sympoziumv1alpha1.SecretRef{Secret: secretName}
-		}
+	// An agent config's own credential replaces the ensemble-level one for that
+	// channel type, so one config can use a different bot token from the rest.
+	if secretName, ok := persona.ChannelConfigs[ch]; ok && secretName != "" {
+		cs.ConfigRef = sympoziumv1alpha1.SecretRef{Secret: secretName}
+	} else if secretName, ok := pack.Spec.ChannelConfigs[ch]; ok && secretName != "" {
+		cs.ConfigRef = sympoziumv1alpha1.SecretRef{Secret: secretName}
 	}
 	if persona.ChannelAccessControl != nil {
 		if ac, ok := persona.ChannelAccessControl[ch]; ok {
@@ -1150,10 +992,13 @@ func buildDesiredSkills(pack *sympoziumv1alpha1.Ensemble, persona *sympoziumv1al
 		ref := sympoziumv1alpha1.SkillRef{
 			SkillPackRef: s,
 		}
-		if pack.Spec.SkillParams != nil {
-			if params, ok := pack.Spec.SkillParams[s]; ok && len(params) > 0 {
-				ref.Params = params
-			}
+		// An agent config's own params replace the ensemble-level map for that
+		// skill outright — full override, not a key-by-key merge — so a config
+		// that needs different parameters restates them in full.
+		if params, ok := persona.SkillParams[s]; ok && len(params) > 0 {
+			ref.Params = params
+		} else if params, ok := pack.Spec.SkillParams[s]; ok && len(params) > 0 {
+			ref.Params = params
 		}
 		skills = append(skills, ref)
 	}
@@ -1172,11 +1017,20 @@ func buildDesiredSkills(pack *sympoziumv1alpha1.Ensemble, persona *sympoziumv1al
 		})
 	}
 
-	// Web endpoint skill.
+	// Web endpoint skill. Its params are derived here rather than taken from
+	// skillParams, so a persona entry for "web-endpoint" cannot clobber them.
 	if persona.WebEndpoint != nil && persona.WebEndpoint.Enabled {
 		params := map[string]string{}
 		if persona.WebEndpoint.Hostname != "" {
 			params["hostname"] = persona.WebEndpoint.Hostname
+		}
+		if rl := persona.WebEndpoint.RateLimit; rl != nil {
+			if rl.RequestsPerMinute > 0 {
+				params["rate_limit_rpm"] = strconv.Itoa(rl.RequestsPerMinute)
+			}
+			if rl.BurstSize > 0 {
+				params["rate_limit_burst"] = strconv.Itoa(rl.BurstSize)
+			}
 		}
 		skills = append(skills, sympoziumv1alpha1.SkillRef{
 			SkillPackRef: "web-endpoint",
@@ -1203,19 +1057,6 @@ func skillRefsEqual(a, b []sympoziumv1alpha1.SkillRef) bool {
 			if b[i].Params[k] != v {
 				return false
 			}
-		}
-	}
-	return true
-}
-
-// mcpServerRefsEqual compares two MCPServerRef slices for equality.
-func mcpServerRefsEqual(a, b []sympoziumv1alpha1.MCPServerRef) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !reflect.DeepEqual(a[i], b[i]) {
-			return false
 		}
 	}
 	return true
@@ -1390,11 +1231,23 @@ func (r *EnsembleReconciler) reconcileSharedMemory(ctx context.Context, log logr
 			},
 		}
 
+		// Gate the admin-only DELETE /delete endpoint on a Secret-backed bearer
+		// token, injected into the shared-memory pod only (never into agents), so
+		// workflow_memory_* entries are equally deletable and token-guarded.
+		deploy.Spec.Template.Spec.Containers[0].Env = append(deploy.Spec.Template.Spec.Containers[0].Env, memoryAdminTokenEnv()...)
+
 		if err := controllerutil.SetControllerReference(pack, deploy, r.Scheme); err != nil {
 			return err
 		}
 		log.Info("Creating shared memory Deployment", "name", deployName)
 		if err := r.Create(ctx, deploy); err != nil {
+			return err
+		}
+	} else {
+		// Already exists. The rest of the spec is deliberately left alone, but the
+		// admin-token env is reconciled so enabling adminDelete (or pointing it at a
+		// different Secret) takes effect without deleting the Deployment.
+		if err := syncMemoryAdminTokenEnv(ctx, r.Client, log, &existingDeploy); err != nil {
 			return err
 		}
 	}

@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/agentedit"
 	"github.com/sympozium-ai/sympozium/internal/controller"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
 )
@@ -281,9 +282,10 @@ func (s *Server) buildMux(frontendFS fs.FS, expected *tokenReader) http.Handler 
 // Health and metrics endpoints are exempted.
 //
 // The expected token is read through a tokenReader so that a Secret rotation
-// takes effect without a pod restart. Each request calls expected.Current()
-// (which is a single stat() syscall against the mounted file when the
-// underlying mtime has not changed).
+// takes effect without a pod restart. Each request calls expected.Current(),
+// which re-reads the mounted file (one stat + read syscall pair, a few µs).
+// If the expected token is empty at request time, the middleware fails closed
+// (401) — running open is a startup decision only.
 func authMiddleware(expected *tokenReader, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -312,11 +314,19 @@ func authMiddleware(expected *tokenReader, next http.Handler) http.Handler {
 			token = r.URL.Query().Get("token")
 		}
 		got := []byte(token)
+		expectedBytes := []byte(expected.Current())
+		// Fail closed: if the expected token is empty (file rotated to
+		// empty, or read failure with no cached value), reject unconditionally.
+		// Running open is a startup decision, not something a runtime
+		// rotation should be able to flip.
+		if len(expectedBytes) == 0 {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		// Length-mismatch short-circuit: subtle.ConstantTimeCompare returns
 		// 0 on different-length inputs but the timing leak on length is
 		// visible. Branches on length are not a leak we care about (token
 		// length is fixed for any given deployment), so reject early.
-		expectedBytes := []byte(expected.Current())
 		if len(got) != len(expectedBytes) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -448,65 +458,68 @@ func (s *Server) patchAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build the edit rather than mutating the Agent directly: agentedit routes it
+	// to the owning Ensemble's agent config when the Agent is ensemble-managed, so
+	// the change is not reverted by the next reconcile.
+	edit := agentedit.Edit{}
+
 	if req.WebEndpoint != nil {
-		if req.WebEndpoint.Enabled != nil && !*req.WebEndpoint.Enabled {
-			// Disable — remove the web-endpoint skill.
-			var filtered []sympoziumv1alpha1.SkillRef
-			for _, s := range inst.Spec.Skills {
-				if s.SkillPackRef != "web-endpoint" && s.SkillPackRef != "skillpack-web-endpoint" {
-					filtered = append(filtered, s)
-				}
-			}
-			inst.Spec.Skills = filtered
-		} else {
-			// Enable — add web-endpoint as a skill.
-			params := map[string]string{}
-			if req.WebEndpoint.Hostname != nil && *req.WebEndpoint.Hostname != "" {
-				params["hostname"] = *req.WebEndpoint.Hostname
+		we := &agentedit.WebEndpointEdit{
+			Enabled: req.WebEndpoint.Enabled == nil || *req.WebEndpoint.Enabled,
+		}
+		if we.Enabled {
+			if req.WebEndpoint.Hostname != nil {
+				we.Hostname = *req.WebEndpoint.Hostname
 			}
 			if req.WebEndpoint.RateLimit != nil && req.WebEndpoint.RateLimit.RequestsPerMinute != nil {
-				params["rate_limit_rpm"] = fmt.Sprintf("%d", *req.WebEndpoint.RateLimit.RequestsPerMinute)
-			}
-
-			// Check if web-endpoint skill already exists.
-			found := false
-			for i, s := range inst.Spec.Skills {
-				if s.SkillPackRef == "web-endpoint" || s.SkillPackRef == "skillpack-web-endpoint" {
-					inst.Spec.Skills[i].Params = params
-					found = true
-					break
-				}
-			}
-			if !found {
-				inst.Spec.Skills = append(inst.Spec.Skills, sympoziumv1alpha1.SkillRef{
-					SkillPackRef: "web-endpoint",
-					Params:       params,
-				})
+				we.RequestsPerMinute = *req.WebEndpoint.RateLimit.RequestsPerMinute
 			}
 		}
+		edit.WebEndpoint = we
 	}
 
 	// Apply lifecycle hooks patch.
 	if req.Lifecycle != nil {
-		hasHooks := len(req.Lifecycle.PreRun) > 0 || len(req.Lifecycle.PostRun) > 0 || len(req.Lifecycle.RBAC) > 0
-		if hasHooks {
-			inst.Spec.Agents.Default.Lifecycle = req.Lifecycle
-		} else {
-			inst.Spec.Agents.Default.Lifecycle = nil
+		hooks := req.Lifecycle
+		if len(hooks.PreRun) == 0 && len(hooks.PostRun) == 0 && len(hooks.RBAC) == 0 {
+			hooks = nil
 		}
+		edit.Lifecycle = &hooks
 	}
 
 	// Apply requireApproval toggle. This adds or removes a built-in manual
 	// gate hook that sleeps until an operator approves via the UI or API.
+	// It composes with the lifecycle patch above, so it is applied to a copy of
+	// the Agent and the resulting hooks are handed to agentedit.
 	if req.RequireApproval != nil {
-		applyRequireApproval(&inst, *req.RequireApproval)
+		staged := inst.DeepCopy()
+		if edit.Lifecycle != nil {
+			staged.Spec.Agents.Default.Lifecycle = *edit.Lifecycle
+		}
+		applyRequireApproval(staged, *req.RequireApproval)
+		hooks := staged.Spec.Agents.Default.Lifecycle
+		edit.Lifecycle = &hooks
 	}
 
-	if err := s.client.Update(r.Context(), &inst); err != nil {
+	target, err := agentedit.Apply(r.Context(), s.client, &inst, edit)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// The body stays the Agent, as clients expect; the header says where the edit
+	// landed and whether it has taken effect. agentedit waits for an
+	// ensemble-routed edit to reach the Agent before returning, so a client
+	// re-reading on success normally sees the new values — except when the header
+	// reports "still updating", in which case its next poll will pick them up.
+	//
+	// inst is re-read so the body reflects the reconciled state rather than what
+	// was fetched at the top of the handler.
+	if err := s.client.Get(r.Context(), types.NamespacedName{Name: name, Namespace: ns}, &inst); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("X-Sympozium-Applied-To", target.String())
 	writeJSON(w, inst)
 }
 
@@ -877,6 +890,7 @@ type CreateRunRequest struct {
 	SessionKey string `json:"sessionKey,omitempty"`
 	Model      string `json:"model,omitempty"`
 	Timeout    string `json:"timeout,omitempty"`
+	Backend    string `json:"backend,omitempty"`
 }
 
 func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
@@ -952,6 +966,14 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		model = inst.Spec.Agents.Default.Model
 	}
 
+	// Use request-supplied timeout or fall back to the instance default.
+	timeout := inst.Spec.Agents.Default.ParseRunTimeout()
+	if req.Timeout != "" {
+		if d, err := time.ParseDuration(req.Timeout); err == nil {
+			timeout = &metav1.Duration{Duration: d}
+		}
+	}
+
 	run := &sympoziumv1alpha1.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: req.AgentRef + "-",
@@ -965,6 +987,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 			AgentID:    req.AgentID,
 			SessionKey: req.SessionKey,
 			Task:       sympoziumv1alpha1.NewStringTask(req.Task),
+			Backend:    req.Backend,
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider:                 provider,
 				Model:                    model,
@@ -978,7 +1001,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 			ImagePullSecrets: inst.Spec.ImagePullSecrets,
 			Lifecycle:        inst.Spec.Agents.Default.Lifecycle,
 			Env:              inst.Spec.Agents.Default.Env,
-			Timeout:          inst.Spec.Agents.Default.ParseRunTimeout(),
+			Timeout:          timeout,
 		},
 	}
 
@@ -3552,6 +3575,38 @@ type CapabilityStatus struct {
 // CapabilitiesResponse lists optional features and whether their prerequisites are met.
 type CapabilitiesResponse struct {
 	AgentSandbox CapabilityStatus `json:"agentSandbox"`
+	Celln        CapabilityStatus `json:"celln"`
+}
+
+// defaultCellnRouterURL mirrors internal/controller/agentrun_celln.go's fallback:
+// the controller will still attempt this address even if CELLN_ROUTER_URL isn't
+// set on this pod, so capability reporting checks the same default.
+const defaultCellnRouterURL = "http://celln-router.celln-system.svc.cluster.local:8787"
+
+// getCellnStatus reports whether the Celln backend is reachable from the
+// apiserver. The router has no HTTP health endpoint, so this does a short
+// TCP dial, matching the TCP probes the chart's own Service/pod probes use.
+func (s *Server) getCellnStatus() CapabilityStatus {
+	routerURL := os.Getenv("CELLN_ROUTER_URL")
+	if routerURL == "" {
+		routerURL = defaultCellnRouterURL
+	}
+	u, err := url.Parse(routerURL)
+	if err != nil || u.Host == "" {
+		return CapabilityStatus{
+			Available: false,
+			Reason:    fmt.Sprintf("Celln router URL is misconfigured: %q", routerURL),
+		}
+	}
+	conn, err := net.DialTimeout("tcp", u.Host, 2*time.Second)
+	if err != nil {
+		return CapabilityStatus{
+			Available: false,
+			Reason:    fmt.Sprintf("Celln router at %s is not reachable: %v", u.Host, err),
+		}
+	}
+	_ = conn.Close()
+	return CapabilityStatus{Available: true}
 }
 
 func (s *Server) getCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -3597,6 +3652,8 @@ func (s *Server) getCapabilities(w http.ResponseWriter, r *http.Request) {
 			Reason:    "Kubernetes client not available",
 		}
 	}
+
+	resp.Celln = s.getCellnStatus()
 
 	writeJSON(w, resp)
 }

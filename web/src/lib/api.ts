@@ -29,6 +29,7 @@ export interface SecretRef {
 export interface MemorySpec {
   enabled: boolean;
   maxSizeKB?: number;
+  autoStore?: boolean;
   systemPrompt?: string;
 }
 
@@ -183,6 +184,7 @@ export interface AgentRunSpec {
   timeout?: string;
   cleanup?: string;
   mode?: string;
+  backend?: string;
   lifecycle?: LifecycleHooks;
   parent?: ParentRunRef;
 }
@@ -480,6 +482,7 @@ export interface AgentConfigSchedule {
 
 export interface AgentConfigMemory {
   enabled: boolean;
+  autoStore?: boolean;
   seeds?: string[];
 }
 
@@ -607,6 +610,8 @@ export interface EnsembleSpec {
   relationships?: AgentConfigRelationship[];
   workflowType?: "autonomous" | "pipeline" | "delegation";
   sharedMemory?: SharedMemorySpec;
+  /** Default for whether generated agents auto-store each run's summary. */
+  autoStoreMemory?: boolean;
   /** Base URL for the inference endpoint. */
   baseURL?: string;
   /** References a Model CR for cluster-local inference. */
@@ -836,6 +841,7 @@ export interface CapabilityStatus {
 
 export interface CapabilitiesResponse {
   agentSandbox: CapabilityStatus;
+  celln: CapabilityStatus;
 }
 
 // ── Model Density (llmfit DaemonSet telemetry) ─────────────────────────────────────
@@ -1185,6 +1191,7 @@ export const api = {
       task: string;
       model?: string;
       timeout?: string;
+      backend?: string;
     }) =>
       apiFetch<AgentRun>("/api/v1/runs", {
         method: "POST",
